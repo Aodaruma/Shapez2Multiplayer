@@ -1,0 +1,22 @@
+{
+  "Name": "aod.Shapez2Multiplayer",
+  "Version": "0.1.0",
+  "Title": "Shapez 2 Multiplayer",
+  "Description": "Experimental host-authoritative P2P multiplayer for shapez 2.",
+  "Author": "Aod",
+  "SavedModVersionCompabilityRangeWithSelf": "<0.2.0",
+  "GameVersionSupportRange": "1.0.*",
+  "AffectsSaveGames": true,
+  "DisablesAchievements": true,
+  "Conflicts": [],
+  "Assemblies": [
+    "Shapez2Multiplayer.dll"
+  ],
+  "Dependencies": [
+    {
+      "ModId": "steam:3542611357",
+      "ModTitle": "Shapez Shifter",
+      "Version": "1.0.*"
+    }
+  ]
+}

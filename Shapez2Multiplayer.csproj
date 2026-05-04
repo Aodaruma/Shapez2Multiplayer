@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>Shapez2Multiplayer</AssemblyName>
+    <RootNamespace>Shapez2Multiplayer</RootNamespace>
+    <GameManagedDir Condition="'$(GameManagedDir)' == ''">D:\SteamLibrary\steamapps\common\shapez 2\shapez 2_Data\Managed</GameManagedDir>
+    <ShapezShifterDir Condition="'$(ShapezShifterDir)' == ''">D:\SteamLibrary\steamapps\workshop\content\2162800\3542611357</ShapezShifterDir>
+    <ModDeployDir Condition="'$(ModDeployDir)' == ''">$(USERPROFILE)\AppData\LocalLow\tobspr Games\shapez 2\mods\aod.Shapez2Multiplayer</ModDeployDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Core">
+      <HintPath>$(GameManagedDir)\Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Game.Core.Modding">
+      <HintPath>$(GameManagedDir)\Game.Core.Modding.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ShapezShifter">
+      <HintPath>$(ShapezShifterDir)\ShapezShifter.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="DeployToShapez2Mods" AfterTargets="Build" Condition="'$(DeployToShapez2Mods)' == 'true'">
+    <MakeDir Directories="$(ModDeployDir)" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).dll" DestinationFolder="$(ModDeployDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\manifest.json" DestinationFolder="$(ModDeployDir)" />
+  </Target>
+</Project>
