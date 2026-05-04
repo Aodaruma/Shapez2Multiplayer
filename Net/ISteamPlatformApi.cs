@@ -7,4 +7,10 @@ public interface ISteamPlatformApi
     bool TryCreateLobby(out ulong lobbyId);
 
     bool TryJoinLobby(ulong lobbyId);
+
+    bool TryLeaveLobby(ulong lobbyId);
+
+    ulong GetLobbyOwnerSteamId(ulong lobbyId);
+
+    ulong[] GetLobbyMemberSteamIds(ulong lobbyId);
 }

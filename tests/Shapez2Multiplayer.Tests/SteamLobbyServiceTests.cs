@@ -45,5 +45,20 @@ public class SteamLobbyServiceTests
         {
             return true;
         }
+
+        public bool TryLeaveLobby(ulong lobbyId)
+        {
+            return true;
+        }
+
+        public ulong GetLobbyOwnerSteamId(ulong lobbyId)
+        {
+            return 1;
+        }
+
+        public ulong[] GetLobbyMemberSteamIds(ulong lobbyId)
+        {
+            return [1];
+        }
     }
 }

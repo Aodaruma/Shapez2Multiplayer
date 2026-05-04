@@ -44,5 +44,15 @@ public sealed class SteamLobbyService
         return LobbyOperationResult.Succeeded(lobbyId, localPlayerId);
     }
 
+    public NetworkError LeaveLobby(ulong lobbyId)
+    {
+        if (!steamApi.IsInitialized)
+        {
+            return NetworkError.SteamNotInitialized;
+        }
+
+        return steamApi.TryLeaveLobby(lobbyId) ? NetworkError.None : NetworkError.LobbyJoinFailed;
+    }
+
     private uint AllocatePlayerId() => nextPlayerId++;
 }
