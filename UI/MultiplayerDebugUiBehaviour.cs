@@ -7,7 +7,7 @@ namespace Shapez2Multiplayer.UI;
 
 public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
 {
-    private readonly Rect defaultRect = new(20f, 20f, 460f, 250f);
+    private readonly Rect defaultRect = new(20f, 20f, 460f, 320f);
     private readonly int windowId = "Shapez2MultiplayerDebugUi".GetHashCode();
 
     private Core.Logging.ILogger? logger;
@@ -67,6 +67,8 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         GUILayout.Label($"Role: {(session.IsHost ? "Host" : "Client/None")}");
         GUILayout.Label($"Owner: {(session.IsInLobby ? session.CurrentOwnerSteamId.ToString() : "N/A")}");
         GUILayout.Label($"Members: {session.CurrentMembers.Length}");
+        GUILayout.Label($"Connected Peers: {session.ConnectedPeerCount}");
+        GUILayout.Label($"RTT: {BuildRttText(session)}");
 
         GUILayout.Space(8);
         GUILayout.BeginHorizontal();
@@ -100,5 +102,31 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
     {
         session?.Dispose();
         session = null;
+    }
+
+    private static string BuildRttText(MultiplayerSessionController session)
+    {
+        if (session.PeerRttMs.Count == 0)
+        {
+            return "N/A";
+        }
+
+        System.Text.StringBuilder sb = new();
+        bool first = true;
+        foreach (System.Collections.Generic.KeyValuePair<ulong, int> kv in session.PeerRttMs)
+        {
+            if (!first)
+            {
+                sb.Append(" | ");
+            }
+
+            sb.Append(kv.Key);
+            sb.Append(":");
+            sb.Append(kv.Value);
+            sb.Append("ms");
+            first = false;
+        }
+
+        return sb.ToString();
     }
 }

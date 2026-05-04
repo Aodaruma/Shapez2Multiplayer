@@ -19,6 +19,7 @@ public sealed class MultiplayerSessionController : IDisposable
     private uint nextSequence;
     private uint nextPingId = 1;
     private long nextPingAtMs;
+    private long nextStatusLogAtMs;
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -62,6 +63,7 @@ public sealed class MultiplayerSessionController : IDisposable
         IsHost = true;
         CurrentLobbyId = result.LobbyId;
         nextPingAtMs = GetNowMs() + 1000;
+        nextStatusLogAtMs = GetNowMs() + 2000;
         connectedPeers.Clear();
         peerRtts.Clear();
         pendingPings.Clear();
@@ -95,6 +97,7 @@ public sealed class MultiplayerSessionController : IDisposable
         IsHost = false;
         CurrentLobbyId = result.LobbyId;
         nextPingAtMs = GetNowMs() + 1000;
+        nextStatusLogAtMs = GetNowMs() + 2000;
         connectedPeers.Clear();
         peerRtts.Clear();
         pendingPings.Clear();
@@ -120,6 +123,7 @@ public sealed class MultiplayerSessionController : IDisposable
         connectedPeers.Clear();
         peerRtts.Clear();
         pendingPings.Clear();
+        nextStatusLogAtMs = 0;
         StatusText = "Idle";
     }
 
@@ -138,6 +142,7 @@ public sealed class MultiplayerSessionController : IDisposable
         PumpIncomingControlPackets();
         SendPeriodicPings();
         StatusText = $"Lobby={CurrentLobbyId} host={IsHost} peers={ConnectedPeerCount}";
+        EmitStatusLogIfDue();
     }
 
     public void Dispose()
@@ -306,6 +311,7 @@ public sealed class MultiplayerSessionController : IDisposable
                         pendingPings.Remove(pong.PingId);
                         int rtt = checked((int)(GetNowMs() - pending.SentAtMs));
                         peerRtts[senderSteamId] = rtt;
+                        logger.Info?.Log($"[MP_NET] RTT peer={senderSteamId} rttMs={rtt}");
                     }
 
                     break;
@@ -338,12 +344,33 @@ public sealed class MultiplayerSessionController : IDisposable
             return;
         }
 
-        connectedPeers.Add(steamId);
+        bool added = connectedPeers.Add(steamId);
+        if (added)
+        {
+            logger.Info?.Log($"[MP_NET] Peer connected steamId={steamId}");
+        }
     }
 
     private static long GetNowMs()
     {
         return unchecked((long)(uint)Environment.TickCount);
+    }
+
+    private void EmitStatusLogIfDue()
+    {
+        long now = GetNowMs();
+        if (now < nextStatusLogAtMs)
+        {
+            return;
+        }
+
+        nextStatusLogAtMs = now + 5000;
+
+        string role = IsHost ? "host" : "client";
+        string peers = connectedPeers.Count == 0 ? "none" : string.Join(",", connectedPeers);
+        string rtts = peerRtts.Count == 0 ? "none" : string.Join(",", peerRtts);
+
+        logger.Info?.Log($"[MP_NET] Status role={role} lobby={CurrentLobbyId} peers={peers} rtts={rtts}");
     }
 
     private readonly struct PendingPing
