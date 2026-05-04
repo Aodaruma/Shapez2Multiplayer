@@ -1,7 +1,8 @@
 # Shapez2Multiplayer
 
 shapez 2 向けの実験的マルチプレイ Mod（ホスト権威型 P2P）です。  
-詳細仕様は [docs/shapez_2_multiplayer_mod_spec.md](docs/shapez_2_multiplayer_mod_spec.md) を参照してください。
+詳細仕様は [docs/shapez_2_multiplayer_mod_spec.md](docs/shapez_2_multiplayer_mod_spec.md) を参照してください。  
+接続の簡易手順は [docs/host_client_quickstart_ja.md](docs/host_client_quickstart_ja.md) にあります。
 
 ## Important Notes
 
@@ -11,94 +12,102 @@ Only identical game/mod versions are supported.
 Host migration is not supported.  
 Desyncs may require rejoining the session.
 
-## 採用方針（仕様固定）
+## 現在のステータス（2026-05-05）
 
-- 言語: C#
-- ターゲット: `netstandard2.1`
-- ゲーム: shapez 2 `1.0.x`
-- Mod API: Shapez Shifter `1.0.*`
-- 通信: Steam P2P（`Steamworks.NET` 想定）
-- 同期モデル: Host-authoritative（クライアントは要求送信、確定はホスト）
+- Mod のロードと初期化ログ出力（`[MP_INIT]`）は確認済み
+- インゲーム Debug UI（`F8` で表示切替）を実装済み
+- `Host Lobby` / `Join Lobby` / `Leave Lobby` / `Copy Lobby ID` / `Join From Clipboard`（`F9`）を実装済み
+- `Hello/Welcome` と `Ping/Pong` による P2P 基本疎通、接続状態ログ（`[MP_NET] Status ...`）を実装済み
+- ホスト側での Lobby 作成ログ確認は完了
+- 建築・削除・Blueprint・Snapshot の実ワールド同期は未実装（次フェーズ）
 
-## 現状
-
-- 2026-05-04 時点では、実装コードは未着手で仕様書中心の状態です。
-- これから Phase 0（雛形作成）から順に実装します。
-
-## 開発環境の前提
+## 必要環境
 
 - Windows + Steam
-- shapez 2 本体（`1.0.x`）
-- Shapez Shifter（`1.0.*`）
-- .NET SDK（`8.x` 以上推奨。`netstandard2.1` のビルドに使用）
+- shapez 2（`1.0.x`）
+- Shapez Shifter（`steam:3542611357`）
+- .NET SDK `8.x`
 - Git
 
-## セットアップ手順（Phase 0）
+## 開発セットアップ
 
-1. Steam で shapez 2 をインストールし、起動確認する
-2. Shapez Shifter（`steam:3542611357`）を導入する
-3. このリポジトリで Mod 雛形を作成する
+1. shapez 2 と Shapez Shifter をインストールし、最低1回起動する
+2. このリポジトリをクローンする
+3. 参照パスを確認する（必要ならビルド引数で上書き）
 
-```powershell
-dotnet new classlib --framework netstandard2.1 --name Shapez2Multiplayer --output . --force
-```
+既定値は [`Shapez2Multiplayer.csproj`](Shapez2Multiplayer.csproj) にあります。
 
-4. `manifest.json` と Mod エントリクラス（`Shapez2MultiplayerMod.cs`）を追加する
-5. Shapez Shifter / Steamworks.NET 参照を `.csproj` に設定する
-6. ビルドして DLL を出力する
+- `GameManagedDir` 例: `D:\SteamLibrary\steamapps\common\shapez 2\shapez 2_Data\Managed`
+- `ShapezShifterDir` 例: `D:\SteamLibrary\steamapps\workshop\content\2162800\3542611357`
+- `ModDeployDir` 例: `C:\Users\<user>\AppData\LocalLow\tobspr Games\shapez 2\mods\aod.Shapez2Multiplayer`
+
+## ビルド
+
+ゲーム連携あり（通常開発用）:
 
 ```powershell
 dotnet build .\Shapez2Multiplayer.csproj -c Release
 ```
 
-7. 生成 DLL と `manifest.json` を shapez 2 の Mod 配置先に配置して読み込み確認する
-8. このリポジトリでは次のコマンドで自動配置できる（`DeployToShapez2Mods` ターゲット）
+ビルド後に Mod フォルダへ自動配置:
 
 ```powershell
 dotnet build .\Shapez2Multiplayer.csproj -c Release -p:DeployToShapez2Mods=true
 ```
 
-## このリポジトリでの事前確認結果（2026-05-04）
+CI/ヘッドレス検証用（ゲーム DLL なし）:
 
-- `dotnet --version`: `8.0.420`
-- `git --version`: `2.54.0.windows.1`
-- shapez 2 本体: `D:\SteamLibrary\steamapps\common\shapez 2`
-- Shapez Shifter: `D:\SteamLibrary\steamapps\workshop\content\2162800\3542611357\ShapezShifter.dll`
-- ローカル Mod 配置先（既定）: `C:\Users\aod\AppData\LocalLow\tobspr Games\shapez 2\mods\aod.Shapez2Multiplayer`
+```powershell
+dotnet build .\Shapez2Multiplayer.csproj -c Release -p:UseGameAssemblies=false
+dotnet test .\tests\Shapez2Multiplayer.Tests\Shapez2Multiplayer.Tests.csproj -c Release -p:UseGameAssemblies=false
+```
 
-上記から、ローカルの .NET ビルド基盤は利用可能です。  
-ただし、実際にゲーム連携まで確認するには shapez 2 / Shapez Shifter / Steam 実行環境が必要です。
+## Host / Join の使い方（現行 UI）
 
-## 実装ロードマップ（仕様準拠）
+1. shapez 2 を起動してワールドを開く
+2. `F8` で `Shapez2Multiplayer Debug` パネルを表示する
+3. ホスト側で `Host Lobby` を押す
+4. `Copy Lobby ID` で ID をコピーしてクライアントへ共有する
+5. クライアント側で次のいずれかを実行する
+- `Join Lobby ID` に貼り付けて `Join Lobby`
+- クリップボードに ID を入れた状態で `Join From Clipboard`
+- クリップボードに ID を入れた状態で `F9`
+6. `Status` / `Connected Peers` / `RTT` と `Player.log` を確認する
 
-1. Phase 0: Mod 雛形（`manifest.json`, `Shapez2Multiplayer.csproj`, エントリクラス）
-2. Phase 1: Steam Lobby と Ping/Pong
-3. Phase 2: Join Snapshot（分割転送・再構築）
-4. Phase 3: 単一建築 / 削除同期
-5. Phase 4: Blueprint 同期
-6. Phase 5: 研究 / 速度 / Pause 同期
-7. Phase 6: Desync 検出と Resync
-8. Phase 7: UI/UX（Host/Join メニュー、Player List、簡易チャット）
+## ログ
 
-## 直近の実装手順（Task 1〜10）
+ログファイル:
 
-1. Task 1: 雛形作成（ビルド可能・Modロード可能）
-2. Task 2: Protocol 基盤（Header/Reader/Writer/Tests）
-3. Task 3: Transport 抽象（`INetworkTransport` / Loopback）
-4. Task 4: LobbyService（Host/Join API）
-5. Task 5: Ping/Pong（RTT 表示）
-6. Task 6: Commands skeleton（Build/Delete など）
-7. Task 7: HostAuthority skeleton（検証・採番・配信）
-8. Task 8: Hook 調査ログ（配置イベント特定）
-9. Task 9: 単一建築同期
-10. Task 10: 削除同期
+`C:\Users\<user>\AppData\LocalLow\tobspr Games\shapez 2\Player.log`
 
-## 未確定の技術調査ポイント
+主なプレフィックス:
 
-- shapez 2 の配置/削除確定 API
-- Blueprint payload 形式
-- Save snapshot 取得/ロード API
-- 研究状態の取得/反映 API
-- Steamworks.NET を Mod DLL で安全に使うための初期化連携
+- `[MP_INIT]`: 初期化
+- `[MP_LOBBY]`: Host/Join/Leave
+- `[MP_NET]`: Hello/Welcome/Ping/Pong/接続状態
+- `[MP_UI]`: UI 操作
 
-これらがブロッカー化した場合は、まず Hook ログを追加して実際の型・メソッドを特定する方針です。
+## CI/CD
+
+- [`ci-main.yml`](.github/workflows/ci-main.yml)
+- `main` への push で自動テスト
+- `UseGameAssemblies=false` でユニットテスト実行
+
+- [`release-tag.yml`](.github/workflows/release-tag.yml)
+- `v*` タグ push でリリース自動公開
+- 実ゲーム DLL 参照が必要なため self-hosted Windows runner 前提
+- 成果物は `aod.Shapez2Multiplayer` フォルダ構成の zip
+
+## 依存ファイルで詰まった場合の対処
+
+1. self-hosted runner を用意する
+- shapez 2 と Shapez Shifter を導入した Windows マシンに GitHub Runner を登録
+- runner ラベルに `self-hosted`, `windows`, `shapez2-mod` を付与
+
+2. リポジトリ変数を設定する
+- `GAME_MANAGED_DIR`
+- `SHAPEZ_SHIFTER_DIR`
+
+3. まずは CI モードで品質確認を進める
+- `UseGameAssemblies=false` で build/test を先行
+- 実機依存箇所は手元または self-hosted で段階検証
