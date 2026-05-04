@@ -9,11 +9,21 @@
     <GameManagedDir Condition="'$(GameManagedDir)' == ''">D:\SteamLibrary\steamapps\common\shapez 2\shapez 2_Data\Managed</GameManagedDir>
     <ShapezShifterDir Condition="'$(ShapezShifterDir)' == ''">D:\SteamLibrary\steamapps\workshop\content\2162800\3542611357</ShapezShifterDir>
     <ModDeployDir Condition="'$(ModDeployDir)' == ''">$(USERPROFILE)\AppData\LocalLow\tobspr Games\shapez 2\mods\aod.Shapez2Multiplayer</ModDeployDir>
+    <UseGameAssemblies Condition="'$(UseGameAssemblies)' == ''">true</UseGameAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
 
+  <ItemGroup Condition="'$(UseGameAssemblies)' != 'true'">
+    <Compile Remove="Shapez2MultiplayerMod.cs" />
+    <Compile Remove="UI\**\*.cs" />
+    <Compile Remove="Net\FacepunchSteamPlatformApi.cs" />
+    <Compile Remove="Net\MultiplayerSessionController.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseGameAssemblies)' == 'true'">
     <Reference Include="Core">
       <HintPath>$(GameManagedDir)\Core.dll</HintPath>
       <Private>false</Private>

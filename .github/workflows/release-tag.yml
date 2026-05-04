@@ -1,0 +1,91 @@
+name: release-tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on:
+      - self-hosted
+      - windows
+      - shapez2-mod
+    env:
+      MOD_ID: aod.Shapez2Multiplayer
+      GAME_MANAGED_DIR: ${{ vars.GAME_MANAGED_DIR }}
+      SHAPEZ_SHIFTER_DIR: ${{ vars.SHAPEZ_SHIFTER_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Validate dependency paths
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GAME_MANAGED_DIR)) {
+            throw "Repository variable GAME_MANAGED_DIR is not set."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:SHAPEZ_SHIFTER_DIR)) {
+            throw "Repository variable SHAPEZ_SHIFTER_DIR is not set."
+          }
+
+          if (-not (Test-Path -LiteralPath $env:GAME_MANAGED_DIR)) {
+            throw "GAME_MANAGED_DIR not found: $env:GAME_MANAGED_DIR"
+          }
+
+          if (-not (Test-Path -LiteralPath $env:SHAPEZ_SHIFTER_DIR)) {
+            throw "SHAPEZ_SHIFTER_DIR not found: $env:SHAPEZ_SHIFTER_DIR"
+          }
+
+      - name: Restore
+        run: dotnet restore .\tests\Shapez2Multiplayer.Tests\Shapez2Multiplayer.Tests.csproj
+
+      - name: Test (CI mode)
+        run: dotnet test .\tests\Shapez2Multiplayer.Tests\Shapez2Multiplayer.Tests.csproj -c Release --no-restore -p:UseGameAssemblies=false
+
+      - name: Build mod (game assemblies)
+        shell: pwsh
+        run: |
+          dotnet build .\Shapez2Multiplayer.csproj -c Release --no-restore `
+            -p:UseGameAssemblies=true `
+            -p:GameManagedDir="$env:GAME_MANAGED_DIR" `
+            -p:ShapezShifterDir="$env:SHAPEZ_SHIFTER_DIR"
+
+      - name: Package release zip
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:RUNNER_TEMP $env:MOD_ID
+          $releaseZip = Join-Path $env:GITHUB_WORKSPACE "$($env:MOD_ID)-$($env:GITHUB_REF_NAME).zip"
+
+          if (Test-Path -LiteralPath $packageRoot) {
+            Remove-Item -LiteralPath $packageRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $packageRoot | Out-Null
+
+          Copy-Item -LiteralPath .\manifest.json -Destination (Join-Path $packageRoot "manifest.json")
+          Copy-Item -LiteralPath .\bin\Release\netstandard2.1\Shapez2Multiplayer.dll -Destination (Join-Path $packageRoot "Shapez2Multiplayer.dll")
+
+          if (Test-Path -LiteralPath $releaseZip) {
+            Remove-Item -LiteralPath $releaseZip -Force
+          }
+
+          Compress-Archive -Path "$packageRoot\*" -DestinationPath $releaseZip
+          "RELEASE_ZIP=$releaseZip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.RELEASE_ZIP }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
