@@ -50,6 +50,14 @@ public sealed class MultiplayerSessionController : IDisposable
 
     public bool TryHostLobby(out string message)
     {
+        if (IsInLobby)
+        {
+            message = "Host skipped: already in lobby (leave first)";
+            StatusText = message;
+            logger.Info?.Log($"[MP_LOBBY] {message} lobby={CurrentLobbyId}");
+            return false;
+        }
+
         LobbyOperationResult result = lobbyService.HostLobby();
         if (!result.Success)
         {
@@ -76,6 +84,14 @@ public sealed class MultiplayerSessionController : IDisposable
 
     public bool TryJoinLobby(string lobbyIdText, out string message)
     {
+        if (IsInLobby)
+        {
+            message = "Join skipped: already in lobby (leave first)";
+            StatusText = message;
+            logger.Info?.Log($"[MP_LOBBY] {message} lobby={CurrentLobbyId}");
+            return false;
+        }
+
         if (!ulong.TryParse(lobbyIdText, out ulong lobbyId))
         {
             message = "Join failed: invalid lobby id";

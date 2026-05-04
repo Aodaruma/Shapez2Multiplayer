@@ -7,7 +7,7 @@ namespace Shapez2Multiplayer.UI;
 
 public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
 {
-    private readonly Rect defaultRect = new(20f, 20f, 460f, 320f);
+    private readonly Rect defaultRect = new(20f, 20f, 500f, 360f);
     private readonly int windowId = "Shapez2MultiplayerDebugUi".GetHashCode();
 
     private Core.Logging.ILogger? logger;
@@ -37,6 +37,19 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         {
             visible = !visible;
             logger?.Info?.Log($"[MP_UI] Visibility changed visible={visible}");
+        }
+
+        if (Input.GetKeyDown(KeyCode.F9))
+        {
+            joinLobbyIdInput = GUIUtility.systemCopyBuffer.Trim();
+            if (session.TryJoinLobby(joinLobbyIdInput, out string msg))
+            {
+                logger?.Info?.Log("[MP_UI] Join requested from clipboard via F9");
+            }
+            else
+            {
+                logger?.Warning?.Log($"[MP_UI] Join from clipboard via F9 failed: {msg}");
+            }
         }
 
         session.Tick();
@@ -83,6 +96,18 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
+        if (session.IsInLobby && GUILayout.Button("Copy Lobby ID", GUILayout.Height(24)))
+        {
+            GUIUtility.systemCopyBuffer = session.CurrentLobbyId.ToString();
+            logger?.Info?.Log($"[MP_UI] Copied lobby id={session.CurrentLobbyId}");
+        }
+
+        if (GUILayout.Button("Join From Clipboard", GUILayout.Height(24)))
+        {
+            joinLobbyIdInput = GUIUtility.systemCopyBuffer.Trim();
+            session.TryJoinLobby(joinLobbyIdInput, out _);
+        }
+
         GUILayout.Space(8);
         GUILayout.Label("Join Lobby ID:");
         joinLobbyIdInput = GUILayout.TextField(joinLobbyIdInput);
@@ -92,7 +117,7 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         }
 
         GUILayout.Space(8);
-        GUILayout.Label("Press F8 to hide/show this panel.");
+        GUILayout.Label("Press F8 to hide/show this panel. Press F9 to join from clipboard.");
         GUILayout.EndVertical();
 
         GUI.DragWindow(new Rect(0, 0, 10000, 20));
