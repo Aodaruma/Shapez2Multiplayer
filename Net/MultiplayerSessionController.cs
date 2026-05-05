@@ -58,6 +58,7 @@ public sealed class MultiplayerSessionController : IDisposable
     private const int ShadowSnapshotApplyRetryDelayMs = 250;
     private const int ShadowSnapshotApplyWarnEveryAttempts = 20;
     private const int ShadowSnapshotApplyBusyDelayMs = 200;
+    private bool snapshotApplyPauseOwned;
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -211,6 +212,7 @@ public sealed class MultiplayerSessionController : IDisposable
         pendingShadowSnapshotApplyAttempts = 0;
         nextShadowSnapshotApplyAtMs = 0;
         pendingShadowSnapshotApplyReason = string.Empty;
+        ReleaseSnapshotApplyPauseIfOwned();
     }
 
     private bool TrySendBuildCommandInternal(string buildingDefinitionId, int x, int y, int z, byte rotation, byte layer, bool fromMapHook, out string message)
@@ -324,6 +326,7 @@ public sealed class MultiplayerSessionController : IDisposable
         pendingShadowSnapshotApplyAttempts = 0;
         nextShadowSnapshotApplyAtMs = 0;
         pendingShadowSnapshotApplyReason = string.Empty;
+        ReleaseSnapshotApplyPauseIfOwned();
         UnbindMapHooks();
     }
 
@@ -384,6 +387,7 @@ public sealed class MultiplayerSessionController : IDisposable
         pendingShadowSnapshotApplyAttempts = 0;
         nextShadowSnapshotApplyAtMs = 0;
         pendingShadowSnapshotApplyReason = string.Empty;
+        ReleaseSnapshotApplyPauseIfOwned();
         mapHooksReady = false;
         observedBuildingIds.Clear();
         observedIslandIds.Clear();
@@ -1074,6 +1078,7 @@ public sealed class MultiplayerSessionController : IDisposable
             pendingShadowSnapshotApplyAttempts = 0;
             nextShadowSnapshotApplyAtMs = 0;
             pendingShadowSnapshotApplyReason = string.Empty;
+            ReleaseSnapshotApplyPauseIfOwned();
             return;
         }
 
@@ -1088,6 +1093,8 @@ public sealed class MultiplayerSessionController : IDisposable
             return;
         }
 
+        EnsureSnapshotApplyPauseActive();
+
         if (TryIsSimulationGraphUpdating(out bool isUpdating) && isUpdating)
         {
             pendingShadowSnapshotApplyAttempts++;
@@ -1098,7 +1105,10 @@ public sealed class MultiplayerSessionController : IDisposable
                 logger.Info?.Log($"[MP_SNAPSHOT] Real-map apply waiting for simulation idle reason={pendingShadowSnapshotApplyReason} attempts={pendingShadowSnapshotApplyAttempts}");
             }
 
-            return;
+            if (pendingShadowSnapshotApplyAttempts < 40)
+            {
+                return;
+            }
         }
 
         if (TryApplyShadowSnapshotToRealMap(out string applyError))
@@ -1108,6 +1118,7 @@ public sealed class MultiplayerSessionController : IDisposable
             pendingShadowSnapshotApplyAttempts = 0;
             nextShadowSnapshotApplyAtMs = 0;
             pendingShadowSnapshotApplyReason = string.Empty;
+            ReleaseSnapshotApplyPauseIfOwned();
             return;
         }
 
@@ -1161,6 +1172,127 @@ public sealed class MultiplayerSessionController : IDisposable
             }
 
             return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void EnsureSnapshotApplyPauseActive()
+    {
+        if (snapshotApplyPauseOwned || IsHost)
+        {
+            return;
+        }
+
+        if (!TryGetSimulationPaused(out bool paused))
+        {
+            return;
+        }
+
+        if (paused)
+        {
+            return;
+        }
+
+        if (TrySetSimulationPaused(true))
+        {
+            snapshotApplyPauseOwned = true;
+            logger.Info?.Log("[MP_SNAPSHOT] Temporarily paused local simulation for synced-world apply");
+        }
+    }
+
+    private void ReleaseSnapshotApplyPauseIfOwned()
+    {
+        if (!snapshotApplyPauseOwned)
+        {
+            return;
+        }
+
+        snapshotApplyPauseOwned = false;
+        if (TrySetSimulationPaused(false))
+        {
+            logger.Info?.Log("[MP_SNAPSHOT] Restored local simulation pause state after synced-world apply");
+        }
+    }
+
+    private bool TryGetSimulationPaused(out bool isPaused)
+    {
+        isPaused = false;
+        if (!StaticGameCoreAccessor.HasInstance())
+        {
+            return false;
+        }
+
+        object? managers = StaticGameCoreAccessor.G;
+        if (managers is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            PropertyInfo? simSpeedProperty = managers.GetType().GetProperty(
+                "SimulationSpeed",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            object? simSpeed = simSpeedProperty?.GetValue(managers);
+            if (simSpeed is null)
+            {
+                return false;
+            }
+
+            PropertyInfo? isPausedProperty = simSpeed.GetType().GetProperty(
+                "IsPaused",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (isPausedProperty?.GetValue(simSpeed) is bool value)
+            {
+                isPaused = value;
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private bool TrySetSimulationPaused(bool pause)
+    {
+        if (!StaticGameCoreAccessor.HasInstance())
+        {
+            return false;
+        }
+
+        object? managers = StaticGameCoreAccessor.G;
+        if (managers is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            PropertyInfo? simSpeedProperty = managers.GetType().GetProperty(
+                "SimulationSpeed",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            object? simSpeed = simSpeedProperty?.GetValue(managers);
+            if (simSpeed is null)
+            {
+                return false;
+            }
+
+            PropertyInfo? isPausedProperty = simSpeed.GetType().GetProperty(
+                "IsPaused",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (isPausedProperty is null || !isPausedProperty.CanWrite)
+            {
+                return false;
+            }
+
+            isPausedProperty.SetValue(simSpeed, pause);
+            return true;
         }
         catch
         {
