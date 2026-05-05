@@ -7,7 +7,7 @@ namespace Shapez2Multiplayer.UI;
 
 public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
 {
-    private readonly Rect defaultRect = new(20f, 20f, 540f, 560f);
+    private readonly Rect defaultRect = new(20f, 20f, 620f, 760f);
     private readonly int windowId = "Shapez2MultiplayerDebugUi".GetHashCode();
 
     private Core.Logging.ILogger? logger;
@@ -96,6 +96,7 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         GUILayout.Label($"World Entities: {session.WorldEntityCount}");
         GUILayout.Label($"Pending Commands: {session.PendingLocalCommandCount}");
         GUILayout.Label($"Last Command: {session.LastCommandSummary}");
+        GUILayout.Label($"World Sync Enabled: {session.WorldSyncEnabled}");
 
         GUILayout.Space(6);
         GUILayout.Label("Shadow World Entities (first 10):");
@@ -135,6 +136,29 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         {
             joinLobbyIdInput = GUIUtility.systemCopyBuffer.Trim();
             session.TryJoinLobby(joinLobbyIdInput, out _);
+        }
+
+        if (session.IsInLobby && !session.IsHost)
+        {
+            if (!session.WorldSyncEnabled)
+            {
+                if (GUILayout.Button("Join Synced World", GUILayout.Height(28)))
+                {
+                    if (session.TryEnableWorldSync(out string msg))
+                    {
+                        logger?.Info?.Log($"[MP_UI] Join Synced World: {msg}");
+                    }
+                    else
+                    {
+                        logger?.Warning?.Log($"[MP_UI] Join Synced World failed: {msg}");
+                    }
+                }
+            }
+            else if (GUILayout.Button("Leave Synced World", GUILayout.Height(28)))
+            {
+                session.DisableWorldSync();
+                logger?.Info?.Log("[MP_UI] Leave Synced World");
+            }
         }
 
         GUILayout.Space(8);

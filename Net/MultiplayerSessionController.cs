@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using Core.Logging;
 using Shapez2Multiplayer.Authority;
 using Shapez2Multiplayer.Commands;
@@ -27,6 +28,7 @@ public sealed class MultiplayerSessionController : IDisposable
     private readonly Dictionary<ulong, int> peerRtts = new();
     private readonly Dictionary<ulong, SnapshotReceiveBuffer> snapshotBuffers = new();
     private readonly HashSet<BuildingId> observedBuildingIds = new();
+    private readonly Dictionary<string, IBuildingDefinition> knownBuildingDefinitions = new(StringComparer.Ordinal);
 
     private bool disposed;
     private uint nextSequence;
@@ -43,6 +45,10 @@ public sealed class MultiplayerSessionController : IDisposable
     private Player? trackedLocalPlayer;
     private IMapModel? trackedMap;
     private long mapEventSuppressionUntilMs;
+    private bool worldSyncEnabled;
+    private bool pendingAutoLeaveOnNullMap;
+    private long autoLeaveOnNullMapAtMs;
+    private const int AutoLeaveNullMapDelayMs = 1500;
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -83,6 +89,8 @@ public sealed class MultiplayerSessionController : IDisposable
     public int PendingLocalCommandCount => pendingLocalCommands.Count;
 
     public string LastCommandSummary => lastCommandSummary;
+
+    public bool WorldSyncEnabled => worldSyncEnabled;
 
     public bool TryHostLobby(out string message)
     {
@@ -147,6 +155,57 @@ public sealed class MultiplayerSessionController : IDisposable
 
     public bool TrySendBuildCommand(string buildingDefinitionId, int x, int y, int z, byte rotation, byte layer, out string message)
     {
+        return TrySendBuildCommandInternal(buildingDefinitionId, x, y, z, rotation, layer, fromMapHook: false, out message);
+    }
+
+    public bool TryEnableWorldSync(out string message)
+    {
+        if (!IsInLobby)
+        {
+            message = "World sync failed: not in lobby";
+            return false;
+        }
+
+        if (IsHost)
+        {
+            worldSyncEnabled = true;
+            if (TryRebuildShadowWorldFromLiveMap(out string hostSyncError))
+            {
+                message = "Host world sync refreshed from live map";
+                return true;
+            }
+
+            message = $"Host world sync enabled, but refresh failed: {hostSyncError}";
+            return false;
+        }
+
+        worldSyncEnabled = true;
+        if (worldState.Count > 0)
+        {
+            if (!TryApplyShadowSnapshotToRealMap(out string applyError))
+            {
+                message = $"World sync enabled, but snapshot apply failed: {applyError}";
+                return false;
+            }
+        }
+
+        ulong hostSteamId = CurrentOwnerSteamId;
+        if (hostSteamId != 0)
+        {
+            SendHello(hostSteamId);
+        }
+
+        message = "World sync enabled and snapshot requested from host";
+        return true;
+    }
+
+    public void DisableWorldSync()
+    {
+        worldSyncEnabled = false;
+    }
+
+    private bool TrySendBuildCommandInternal(string buildingDefinitionId, int x, int y, int z, byte rotation, byte layer, bool fromMapHook, out string message)
+    {
         if (string.IsNullOrWhiteSpace(buildingDefinitionId))
         {
             message = "Build failed: building id is empty";
@@ -167,10 +226,15 @@ public sealed class MultiplayerSessionController : IDisposable
             ExtraPayload = Array.Empty<byte>()
         };
 
-        return TrySendCommand(command, out message);
+        return TrySendCommand(command, fromMapHook, out message);
     }
 
     public bool TrySendDeleteCommand(int x, int y, int z, byte layer, out string message)
+    {
+        return TrySendDeleteCommandInternal(x, y, z, layer, fromMapHook: false, out message);
+    }
+
+    private bool TrySendDeleteCommandInternal(int x, int y, int z, byte layer, bool fromMapHook, out string message)
     {
         DeleteCommand command = new()
         {
@@ -182,7 +246,7 @@ public sealed class MultiplayerSessionController : IDisposable
             Layer = layer
         };
 
-        return TrySendCommand(command, out message);
+        return TrySendCommand(command, fromMapHook, out message);
     }
 
     public void LeaveLobby()
@@ -207,6 +271,9 @@ public sealed class MultiplayerSessionController : IDisposable
         localWorldRevision = 0;
         nextGlobalSequence = 0;
         lastCommandSummary = "N/A";
+        worldSyncEnabled = false;
+        pendingAutoLeaveOnNullMap = false;
+        autoLeaveOnNullMapAtMs = 0;
         UnbindMapHooks();
     }
 
@@ -223,6 +290,7 @@ public sealed class MultiplayerSessionController : IDisposable
         }
 
         UpdateMapHooks();
+        ProcessPendingAutoLeaveOnNullMap();
 
         PumpIncomingPackets();
         SendPeriodicPings();
@@ -258,8 +326,12 @@ public sealed class MultiplayerSessionController : IDisposable
         localWorldRevision = 0;
         nextGlobalSequence = 0;
         lastCommandSummary = "N/A";
+        worldSyncEnabled = isHost;
+        pendingAutoLeaveOnNullMap = false;
+        autoLeaveOnNullMapAtMs = 0;
         mapHooksReady = false;
         observedBuildingIds.Clear();
+        knownBuildingDefinitions.Clear();
 
         if (isHost)
         {
@@ -279,6 +351,8 @@ public sealed class MultiplayerSessionController : IDisposable
         pendingLocalCommands.Clear();
         snapshotBuffers.Clear();
         snapshotSentPeers.Clear();
+        pendingAutoLeaveOnNullMap = false;
+        autoLeaveOnNullMapAtMs = 0;
     }
 
     private void UpdateMapHooks()
@@ -313,9 +387,13 @@ public sealed class MultiplayerSessionController : IDisposable
         {
             HandleLocalPlayerMapChanged(currentMap);
         }
+        else if (currentMap == default && trackedMap != default)
+        {
+            HandleLocalPlayerMapChanged(default);
+        }
     }
 
-    private void HandleLocalPlayerMapChanged(IMapModel map)
+    private void HandleLocalPlayerMapChanged(IMapModel? map)
     {
         UnbindTrackedMapEvents();
         trackedMap = map;
@@ -324,9 +402,21 @@ public sealed class MultiplayerSessionController : IDisposable
         if (trackedMap == default)
         {
             mapHooksReady = false;
-            logger.Info?.Log("[MP_HOOK] MapChanged: null map");
+            if (IsInLobby)
+            {
+                pendingAutoLeaveOnNullMap = true;
+                autoLeaveOnNullMapAtMs = GetNowMs() + AutoLeaveNullMapDelayMs;
+                logger.Info?.Log($"[MP_HOOK] MapChanged: null map (auto leave scheduled in {AutoLeaveNullMapDelayMs}ms)");
+            }
+            else
+            {
+                logger.Info?.Log("[MP_HOOK] MapChanged: null map");
+            }
             return;
         }
+
+        pendingAutoLeaveOnNullMap = false;
+        autoLeaveOnNullMapAtMs = 0;
 
         trackedMap.OnBuildingAdded.Register(HandleMapBuildingAdded);
         trackedMap.OnBeforeBuildingRemoved.Register(HandleMapBeforeBuildingRemoved);
@@ -334,11 +424,24 @@ public sealed class MultiplayerSessionController : IDisposable
         foreach (BuildingModel building in trackedMap.Buildings)
         {
             observedBuildingIds.Add(building.Id);
+            CacheKnownBuildingDefinition(building.Definition);
         }
 
         mapHooksReady = true;
         mapEventSuppressionUntilMs = GetNowMs() + 2000;
         logger.Info?.Log($"[MP_HOOK] Map hooks ready. existingBuildings={observedBuildingIds.Count}");
+
+        if (IsHost && worldSyncEnabled)
+        {
+            if (TryRebuildShadowWorldFromLiveMap(out string error))
+            {
+                logger.Info?.Log($"[MP_HOOK] Host shadow world refreshed from live map entities={worldState.Count} revision={localWorldRevision}");
+            }
+            else
+            {
+                logger.Warning?.Log($"[MP_HOOK] Host shadow world refresh failed: {error}");
+            }
+        }
     }
 
     private void UnbindTrackedMapEvents()
@@ -364,9 +467,12 @@ public sealed class MultiplayerSessionController : IDisposable
 
         mapHooksReady = false;
         observedBuildingIds.Clear();
+        knownBuildingDefinitions.Clear();
+        pendingAutoLeaveOnNullMap = false;
+        autoLeaveOnNullMapAtMs = 0;
     }
 
-    private bool TrySendCommand(ICommand command, out string message)
+    private bool TrySendCommand(ICommand command, bool fromMapHook, out string message)
     {
         if (!IsInLobby)
         {
@@ -382,6 +488,14 @@ public sealed class MultiplayerSessionController : IDisposable
                 message = $"Host command failed: {hostError}";
                 logger.Warning?.Log($"[MP_COMMAND] {message}");
                 return false;
+            }
+
+            if (!fromMapHook && worldSyncEnabled)
+            {
+                if (!TryApplyCommandToRealMap(command, out string applyError))
+                {
+                    logger.Warning?.Log($"[MP_COMMAND] Host local command accepted but real map apply failed: {applyError}");
+                }
             }
 
             message = $"Host applied local {command.Type} localId={command.LocalCommandId}";
@@ -572,7 +686,7 @@ public sealed class MultiplayerSessionController : IDisposable
                     if (IsHost)
                     {
                         SendWelcome(senderSteamId);
-                        SendSnapshotToPeer(senderSteamId);
+                        SendSnapshotToPeer(senderSteamId, force: true);
                     }
 
                     break;
@@ -615,6 +729,13 @@ public sealed class MultiplayerSessionController : IDisposable
                     if (!TryAcceptAndBroadcastCommand(senderPlayerId, senderSteamId, message.Command, out string error))
                     {
                         logger.Warning?.Log($"[MP_COMMAND] Reject incoming command from={senderSteamId} reason={error}");
+                    }
+                    else if (worldSyncEnabled)
+                    {
+                        if (!TryApplyCommandToRealMap(message.Command, out string applyError))
+                        {
+                            logger.Warning?.Log($"[MP_COMMAND] Incoming command accepted but real map apply failed from={senderSteamId} reason={applyError}");
+                        }
                     }
 
                     break;
@@ -689,6 +810,8 @@ public sealed class MultiplayerSessionController : IDisposable
 
     private void HandleMapBuildingAdded(BuildingModel building)
     {
+        CacheKnownBuildingDefinition(building.Definition);
+
         if (!mapHooksReady || suppressMapEventCommands || !IsInLobby)
         {
             observedBuildingIds.Add(building.Id);
@@ -713,7 +836,7 @@ public sealed class MultiplayerSessionController : IDisposable
         byte layer = ToLayerByte(bz);
         string definitionId = building.Definition.Id.ToString();
 
-        if (!TrySendBuildCommand(definitionId, bx, by, bz, rotation, layer, out string message))
+        if (!TrySendBuildCommandInternal(definitionId, bx, by, bz, rotation, layer, fromMapHook: true, out string message))
         {
             logger.Warning?.Log($"[MP_HOOK] Auto build command failed id={definitionId} pos=({bx},{by},{bz}) rot={rotation} layer={layer} reason={message}");
             return;
@@ -743,7 +866,7 @@ public sealed class MultiplayerSessionController : IDisposable
         short bz = building.Transform_I.Position.z;
         byte layer = ToLayerByte(bz);
 
-        if (!TrySendDeleteCommand(bx, by, bz, layer, out string message))
+        if (!TrySendDeleteCommandInternal(bx, by, bz, layer, fromMapHook: true, out string message))
         {
             logger.Warning?.Log($"[MP_HOOK] Auto delete command failed pos=({bx},{by},{bz}) layer={layer} reason={message}");
             return;
@@ -765,6 +888,376 @@ public sealed class MultiplayerSessionController : IDisposable
         }
 
         return (byte)z;
+    }
+
+    private void ProcessPendingAutoLeaveOnNullMap()
+    {
+        if (!pendingAutoLeaveOnNullMap || !IsInLobby)
+        {
+            return;
+        }
+
+        if (trackedLocalPlayer is null || trackedLocalPlayer.CurrentMap != default)
+        {
+            pendingAutoLeaveOnNullMap = false;
+            autoLeaveOnNullMapAtMs = 0;
+            return;
+        }
+
+        if (GetNowMs() < autoLeaveOnNullMapAtMs)
+        {
+            return;
+        }
+
+        pendingAutoLeaveOnNullMap = false;
+        autoLeaveOnNullMapAtMs = 0;
+        logger.Info?.Log("[MP_HOOK] Auto leave lobby triggered by world exit");
+        LeaveLobby();
+    }
+
+    private bool TryRebuildShadowWorldFromLiveMap(out string error)
+    {
+        if (!IsHost)
+        {
+            error = "only host can rebuild shadow world from live map";
+            return false;
+        }
+
+        if (trackedMap == default)
+        {
+            error = "live map is not available";
+            return false;
+        }
+
+        worldState.Clear();
+        foreach (BuildingModel building in trackedMap.Buildings)
+        {
+            CacheKnownBuildingDefinition(building.Definition);
+            short bx = building.Transform_I.Position.x;
+            short by = building.Transform_I.Position.y;
+            short bz = building.Transform_I.Position.z;
+            BuildCommand command = new()
+            {
+                LocalCommandId = 0,
+                IssuerPlayerId = 0,
+                BuildingDefinitionId = building.Definition.Id.ToString(),
+                X = bx,
+                Y = by,
+                Z = bz,
+                Rotation = (byte)building.Transform_I.Rotation.Value,
+                Layer = ToLayerByte(bz),
+                ExtraPayload = Array.Empty<byte>()
+            };
+            worldState.ApplyBuild(command);
+        }
+
+        localWorldRevision++;
+        snapshotSentPeers.Clear();
+        error = string.Empty;
+        return true;
+    }
+
+    private void CacheKnownBuildingDefinition(IBuildingDefinition definition)
+    {
+        if (definition is null)
+        {
+            return;
+        }
+
+        string definitionId = definition.Id.ToString();
+        if (string.IsNullOrWhiteSpace(definitionId))
+        {
+            return;
+        }
+
+        knownBuildingDefinitions[definitionId] = definition;
+    }
+
+    private bool TryResolveBuildingDefinition(string definitionId, out IBuildingDefinition definition)
+    {
+        definition = default!;
+        if (string.IsNullOrWhiteSpace(definitionId))
+        {
+            return false;
+        }
+
+        if (knownBuildingDefinitions.TryGetValue(definitionId, out IBuildingDefinition known))
+        {
+            definition = known;
+            return true;
+        }
+
+        if (TryResolveDefinitionViaGameMode(definitionId, out IBuildingDefinition resolved))
+        {
+            definition = resolved;
+            knownBuildingDefinitions[definitionId] = resolved;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryResolveDefinitionViaGameMode(string definitionId, out IBuildingDefinition definition)
+    {
+        definition = default!;
+        if (!StaticGameCoreAccessor.HasInstance())
+        {
+            return false;
+        }
+
+        object? mode = StaticGameCoreAccessor.G?.Mode;
+        if (mode is null)
+        {
+            return false;
+        }
+
+        FieldInfo? buildingsField = mode.GetType().GetField("Buildings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        object? buildings = buildingsField?.GetValue(mode);
+        if (buildings is null)
+        {
+            return false;
+        }
+
+        MethodInfo? tryGetDefinition = buildings.GetType().GetMethod(
+            "TryGetDefinition",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(BuildingDefinitionId), typeof(IBuildingDefinition).MakeByRefType() },
+            modifiers: null);
+
+        if (tryGetDefinition is null)
+        {
+            return false;
+        }
+
+        object?[] args = new object?[] { new BuildingDefinitionId(definitionId), null };
+        object? result = tryGetDefinition.Invoke(buildings, args);
+        if (result is bool ok && ok && args[1] is IBuildingDefinition resolved)
+        {
+            definition = resolved;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryApplyCommandToRealMap(ICommand command, out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        bool success = false;
+        string localError = string.Empty;
+        RunWithSuppressedMapEvents(() =>
+        {
+            success = command switch
+            {
+                BuildCommand build => TryApplyBuildToRealMapCore(build, out localError),
+                DeleteCommand delete => TryApplyDeleteToRealMapCore(delete, out localError),
+                _ => false
+            };
+
+            if (!success && command is not BuildCommand && command is not DeleteCommand)
+            {
+                localError = $"unsupported command type for real map apply: {command.Type}";
+            }
+        });
+
+        error = localError;
+        if (success)
+        {
+            mapEventSuppressionUntilMs = GetNowMs() + 500;
+        }
+
+        return success;
+    }
+
+    private bool TryApplyBuildToRealMapCore(BuildCommand command, out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        if (!TryResolveBuildingDefinition(command.BuildingDefinitionId, out IBuildingDefinition definition))
+        {
+            error = $"definition not found: {command.BuildingDefinitionId}";
+            return false;
+        }
+
+        if (!TryMakeGlobalTransform(command.X, command.Y, command.Z, command.Rotation, out Game.Core.Coordinates.GlobalTileTransform transform, out error))
+        {
+            return false;
+        }
+
+        IBuildingConfiguration configuration = default!;
+        _ = definition.TryCreateConfiguration(out configuration);
+
+        trackedMap.CreateBuilding(definition, ref transform, configuration);
+        return true;
+    }
+
+    private bool TryApplyDeleteToRealMapCore(DeleteCommand command, out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        if (!TryMakeGlobalCoordinate(command.X, command.Y, command.Z, out Game.Core.Coordinates.GlobalTileCoordinate position, out error))
+        {
+            return false;
+        }
+
+        if (!trackedMap.TryGetBuilding(position, out BuildingModel building))
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        BuildingId id = building.Id;
+        trackedMap.DeleteBuilding(ref id);
+        error = string.Empty;
+        return true;
+    }
+
+    private bool TryApplyShadowSnapshotToRealMap(out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        List<WorldEntityState> entities = new(worldState.GetAllEntities());
+        entities.Sort(static (a, b) =>
+        {
+            int cmp = a.Layer.CompareTo(b.Layer);
+            if (cmp != 0) return cmp;
+            cmp = a.Z.CompareTo(b.Z);
+            if (cmp != 0) return cmp;
+            cmp = a.Y.CompareTo(b.Y);
+            if (cmp != 0) return cmp;
+            cmp = a.X.CompareTo(b.X);
+            if (cmp != 0) return cmp;
+            return StringComparer.Ordinal.Compare(a.BuildingDefinitionId, b.BuildingDefinitionId);
+        });
+
+        bool success = true;
+        string localError = string.Empty;
+        RunWithSuppressedMapEvents(() =>
+        {
+            if (!TryClearRealMapCore(out localError))
+            {
+                success = false;
+                return;
+            }
+
+            foreach (WorldEntityState entity in entities)
+            {
+                BuildCommand command = new()
+                {
+                    LocalCommandId = 0,
+                    IssuerPlayerId = 0,
+                    BuildingDefinitionId = entity.BuildingDefinitionId,
+                    X = entity.X,
+                    Y = entity.Y,
+                    Z = entity.Z,
+                    Rotation = entity.Rotation,
+                    Layer = entity.Layer,
+                    ExtraPayload = Array.Empty<byte>()
+                };
+
+                if (!TryApplyBuildToRealMapCore(command, out localError))
+                {
+                    success = false;
+                    return;
+                }
+            }
+        });
+
+        error = localError;
+        if (success)
+        {
+            mapEventSuppressionUntilMs = GetNowMs() + 2000;
+            logger.Info?.Log($"[MP_HOOK] Applied shadow snapshot to real map entities={entities.Count}");
+        }
+
+        return success;
+    }
+
+    private bool TryClearRealMapCore(out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        List<BuildingId> toDelete = new();
+        foreach (BuildingModel building in trackedMap.Buildings)
+        {
+            toDelete.Add(building.Id);
+        }
+
+        foreach (BuildingId target in toDelete)
+        {
+            BuildingId id = target;
+            trackedMap.DeleteBuilding(ref id);
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private void RunWithSuppressedMapEvents(Action action)
+    {
+        bool previousSuppress = suppressMapEventCommands;
+        suppressMapEventCommands = true;
+        mapEventSuppressionUntilMs = GetNowMs() + 2000;
+
+        try
+        {
+            action();
+        }
+        finally
+        {
+            suppressMapEventCommands = previousSuppress;
+            mapEventSuppressionUntilMs = GetNowMs() + 500;
+        }
+    }
+
+    private static bool TryMakeGlobalCoordinate(int x, int y, int z, out Game.Core.Coordinates.GlobalTileCoordinate coordinate, out string error)
+    {
+        if (z < short.MinValue || z > short.MaxValue)
+        {
+            coordinate = default;
+            error = $"z out of range for short: {z}";
+            return false;
+        }
+
+        coordinate = new Game.Core.Coordinates.GlobalTileCoordinate(x, y, (short)z);
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryMakeGlobalTransform(int x, int y, int z, byte rotation, out Game.Core.Coordinates.GlobalTileTransform transform, out string error)
+    {
+        if (!TryMakeGlobalCoordinate(x, y, z, out Game.Core.Coordinates.GlobalTileCoordinate coordinate, out error))
+        {
+            transform = default;
+            return false;
+        }
+
+        transform = new Game.Core.Coordinates.GlobalTileTransform(
+            coordinate,
+            new Game.Core.Coordinates.GridRotation(rotation));
+        return true;
     }
 
     private bool TryAcceptAndBroadcastCommand(uint issuerPlayerId, ulong issuerSteamId, ICommand command, out string error)
@@ -838,6 +1331,14 @@ public sealed class MultiplayerSessionController : IDisposable
             logger.Info?.Log($"[MP_COMMAND] Local command confirmed by authoritative local={message.Command.LocalCommandId} ageMs={age}");
         }
 
+        if (!IsHost && worldSyncEnabled)
+        {
+            if (!TryApplyCommandToRealMap(message.Command, out string applyError))
+            {
+                logger.Warning?.Log($"[MP_COMMAND] Authoritative applied to shadow, but real map apply failed: {applyError}");
+            }
+        }
+
         logger.Info?.Log($"[MP_COMMAND] Applied authoritative {message.Command.Type} global={message.GlobalSequence} revision={message.WorldRevision} from={senderSteamId}");
     }
 
@@ -872,14 +1373,14 @@ public sealed class MultiplayerSessionController : IDisposable
         _ = SendPacket(recipientSteamId, NetChannel.Control, MessageType.CommandReject, reject.Serialize(), P2PSend.Reliable);
     }
 
-    private void SendSnapshotToPeer(ulong recipientSteamId)
+    private void SendSnapshotToPeer(ulong recipientSteamId, bool force = false)
     {
         if (!IsHost || recipientSteamId == 0 || recipientSteamId == GetLocalSteamId())
         {
             return;
         }
 
-        if (snapshotSentPeers.Contains(recipientSteamId))
+        if (!force && snapshotSentPeers.Contains(recipientSteamId))
         {
             return;
         }
@@ -969,6 +1470,14 @@ public sealed class MultiplayerSessionController : IDisposable
 
             SnapshotStatusText = $"Snapshot applied id={end.SnapshotId} entities={worldState.Count}";
             logger.Info?.Log($"[MP_SNAPSHOT] Applied snapshot id={end.SnapshotId} from={senderSteamId} entities={worldState.Count} revision={localWorldRevision} localHash={localHash} remoteHash={buffer.Begin.LayoutHash}");
+
+            if (!IsHost && worldSyncEnabled)
+            {
+                if (!TryApplyShadowSnapshotToRealMap(out string applyError))
+                {
+                    logger.Warning?.Log($"[MP_SNAPSHOT] Shadow snapshot applied but real map sync failed: {applyError}");
+                }
+            }
 
             if (!IsHost)
             {
