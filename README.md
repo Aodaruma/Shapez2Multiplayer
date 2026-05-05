@@ -25,7 +25,15 @@ Desyncs may require rejoining the session.
 - `Join Synced World` ボタンでクライアント側の実ワールド同期（Snapshot 適用 + 以後の確定コマンド適用）を有効化可能
 - ホスト/クライアントともに UI の Build/Delete コマンドは実ワールド反映に対応
 - ワールド退出（`OnMapChanged: null`）を検知した場合は Lobby を自動離脱
-- 宇宙ビューのプラットフォーム/島配置（Island 作成・削除）同期は未対応（現状は Building 単位同期）
+- 宇宙ビューのプラットフォーム/島配置（Island 作成・削除）同期に対応
+- Snapshot/WorldHash は島（Island）状態を含めて整合チェック可能
+
+## 現時点の残タスク（優先順）
+
+- 2クライアント実機での長時間検証（ワールド参加、建築/削除、再接続）
+- Desync 発生時の自動再同期導線（自動 Snapshot 再要求など）
+- UI 改善（接続導線、状態表示、入力補助の拡充）
+- `Build/Delete` 以外のコマンド同期（Blueprint / Research / Upgrade など）
 
 ## 必要環境
 
