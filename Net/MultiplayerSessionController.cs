@@ -57,6 +57,7 @@ public sealed class MultiplayerSessionController : IDisposable
     private string pendingShadowSnapshotApplyReason = string.Empty;
     private const int ShadowSnapshotApplyRetryDelayMs = 250;
     private const int ShadowSnapshotApplyWarnEveryAttempts = 20;
+    private const int ShadowSnapshotApplyBusyDelayMs = 200;
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -1087,6 +1088,19 @@ public sealed class MultiplayerSessionController : IDisposable
             return;
         }
 
+        if (TryIsSimulationGraphUpdating(out bool isUpdating) && isUpdating)
+        {
+            pendingShadowSnapshotApplyAttempts++;
+            nextShadowSnapshotApplyAtMs = now + ShadowSnapshotApplyBusyDelayMs;
+            if (pendingShadowSnapshotApplyAttempts == 1 ||
+                pendingShadowSnapshotApplyAttempts % ShadowSnapshotApplyWarnEveryAttempts == 0)
+            {
+                logger.Info?.Log($"[MP_SNAPSHOT] Real-map apply waiting for simulation idle reason={pendingShadowSnapshotApplyReason} attempts={pendingShadowSnapshotApplyAttempts}");
+            }
+
+            return;
+        }
+
         if (TryApplyShadowSnapshotToRealMap(out string applyError))
         {
             logger.Info?.Log($"[MP_SNAPSHOT] Real-map apply completed reason={pendingShadowSnapshotApplyReason} attempts={pendingShadowSnapshotApplyAttempts}");
@@ -1107,6 +1121,120 @@ public sealed class MultiplayerSessionController : IDisposable
             !simulationBusy)
         {
             logger.Warning?.Log($"[MP_SNAPSHOT] Real-map apply retry scheduled reason={pendingShadowSnapshotApplyReason} attempts={pendingShadowSnapshotApplyAttempts} delayMs={delayMs} error={applyError}");
+        }
+    }
+
+    private bool TryIsSimulationGraphUpdating(out bool isUpdating)
+    {
+        isUpdating = false;
+        if (trackedMap == default)
+        {
+            return false;
+        }
+
+        try
+        {
+            object? simulator = trackedMap.Simulator;
+            if (simulator is null)
+            {
+                return false;
+            }
+
+            Type simulatorType = simulator.GetType();
+            object? graph = simulatorType
+                .GetField("SimulationGraph", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?
+                .GetValue(simulator);
+            if (graph is null)
+            {
+                return false;
+            }
+
+            Type graphType = graph.GetType();
+            PropertyInfo? isUpdatingProperty = graphType.GetProperty(
+                "IsUpdating",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (isUpdatingProperty?.GetValue(graph) is bool value)
+            {
+                isUpdating = value;
+                return true;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryRunWithMapBunchEdit(Action action, out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        object editor = trackedMap;
+        Type editorType = editor.GetType();
+
+        MethodInfo? start = editorType.GetMethod(
+            "StartBunchEdit",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        MethodInfo? finish = editorType.GetMethod(
+            "FinishBunchEdit",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+        if (start is null || finish is null)
+        {
+            action();
+            error = string.Empty;
+            return true;
+        }
+
+        object? scope = null;
+        try
+        {
+            scope = start.Invoke(editor, Array.Empty<object>());
+            action();
+            finish.Invoke(editor, new[] { scope });
+            error = string.Empty;
+            return true;
+        }
+        catch (TargetInvocationException ex)
+        {
+            try
+            {
+                if (scope is not null)
+                {
+                    finish.Invoke(editor, new[] { scope });
+                }
+            }
+            catch
+            {
+                // ignored
+            }
+
+            error = ex.InnerException?.Message ?? ex.Message;
+            return false;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                if (scope is not null)
+                {
+                    finish.Invoke(editor, new[] { scope });
+                }
+            }
+            catch
+            {
+                // ignored
+            }
+
+            error = ex.Message;
+            return false;
         }
     }
 
@@ -1527,56 +1655,63 @@ public sealed class MultiplayerSessionController : IDisposable
         string localError = string.Empty;
         try
         {
-            RunWithSuppressedMapEvents(() =>
+            if (!TryRunWithMapBunchEdit(() =>
             {
-                if (!TryClearRealMapCore(out localError))
+                RunWithSuppressedMapEvents(() =>
                 {
-                    success = false;
-                    return;
-                }
-
-                foreach (WorldIslandState island in islands)
-                {
-                    CreateIslandCommand command = new()
-                    {
-                        LocalCommandId = 0,
-                        IssuerPlayerId = 0,
-                        IslandDefinitionId = island.IslandDefinitionId,
-                        X = island.X,
-                        Y = island.Y,
-                        Z = island.Z,
-                        Rotation = island.Rotation
-                    };
-
-                    if (!TryApplyCreateIslandToRealMapCore(command, out localError))
+                    if (!TryClearRealMapCore(out localError))
                     {
                         success = false;
                         return;
                     }
-                }
 
-                foreach (WorldEntityState entity in entities)
-                {
-                    BuildCommand command = new()
+                    foreach (WorldIslandState island in islands)
                     {
-                        LocalCommandId = 0,
-                        IssuerPlayerId = 0,
-                        BuildingDefinitionId = entity.BuildingDefinitionId,
-                        X = entity.X,
-                        Y = entity.Y,
-                        Z = entity.Z,
-                        Rotation = entity.Rotation,
-                        Layer = entity.Layer,
-                        ExtraPayload = Array.Empty<byte>()
-                    };
+                        CreateIslandCommand command = new()
+                        {
+                            LocalCommandId = 0,
+                            IssuerPlayerId = 0,
+                            IslandDefinitionId = island.IslandDefinitionId,
+                            X = island.X,
+                            Y = island.Y,
+                            Z = island.Z,
+                            Rotation = island.Rotation
+                        };
 
-                    if (!TryApplyBuildToRealMapCore(command, out localError))
-                    {
-                        success = false;
-                        return;
+                        if (!TryApplyCreateIslandToRealMapCore(command, out localError))
+                        {
+                            success = false;
+                            return;
+                        }
                     }
-                }
-            });
+
+                    foreach (WorldEntityState entity in entities)
+                    {
+                        BuildCommand command = new()
+                        {
+                            LocalCommandId = 0,
+                            IssuerPlayerId = 0,
+                            BuildingDefinitionId = entity.BuildingDefinitionId,
+                            X = entity.X,
+                            Y = entity.Y,
+                            Z = entity.Z,
+                            Rotation = entity.Rotation,
+                            Layer = entity.Layer,
+                            ExtraPayload = Array.Empty<byte>()
+                        };
+
+                        if (!TryApplyBuildToRealMapCore(command, out localError))
+                        {
+                            success = false;
+                            return;
+                        }
+                    }
+                });
+            }, out string bunchEditError))
+            {
+                success = false;
+                localError = bunchEditError;
+            }
         }
         catch (Exception ex)
         {
