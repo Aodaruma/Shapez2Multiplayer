@@ -19,7 +19,9 @@ Desyncs may require rejoining the session.
 - `Host Lobby` / `Join Lobby` / `Leave Lobby` / `Copy Lobby ID` / `Join From Clipboard`（`F9`）を実装済み
 - `Hello/Welcome` と `Ping/Pong` による P2P 基本疎通、接続状態ログ（`[MP_NET] Status ...`）を実装済み
 - ホスト側での Lobby 作成ログ確認は完了
-- 建築・削除・Blueprint・Snapshot の実ワールド同期は未実装（次フェーズ）
+- Join 時 Snapshot（Shadow World）同期と `WorldHash` 照合ログを実装済み
+- Build/Delete コマンドの送受信・Authority 確定・配信（Shadow World 反映）を実装済み
+- shapez 2 実ワールドへの Hook 適用（実建築/実削除への直結）は未実装
 
 ## 必要環境
 
@@ -74,6 +76,12 @@ dotnet test .\tests\Shapez2Multiplayer.Tests\Shapez2Multiplayer.Tests.csproj -c 
 - クリップボードに ID を入れた状態で `F9`
 6. `Status` / `Connected Peers` / `RTT` と `Player.log` を確認する
 
+Build/Delete 疎通テスト:
+
+1. Debug パネル下部の `Build/Delete Command Test` を使用する
+2. 座標・向き・レイヤーを入力して `Send Build Cmd` / `Send Delete Cmd` を実行する
+3. `[MP_COMMAND]` と `World Revision` / `World Entities` の変化を確認する
+
 ## ログ
 
 ログファイル:
@@ -94,7 +102,7 @@ dotnet test .\tests\Shapez2Multiplayer.Tests\Shapez2Multiplayer.Tests.csproj -c 
 - `UseGameAssemblies=false` でユニットテスト実行
 
 - [`release-tag.yml`](.github/workflows/release-tag.yml)
-- `v*` タグ push でリリース自動公開
+- 現在は `workflow_dispatch` のみ（タグ push 自動実行は一時停止中）
 - 実ゲーム DLL 参照が必要なため self-hosted Windows runner 前提
 - 成果物は `aod.Shapez2Multiplayer` フォルダ構成の zip
 

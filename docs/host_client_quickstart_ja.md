@@ -5,9 +5,9 @@
 ## 1. 現在の到達点（重要）
 
 - 本 Mod は **0.1.0 の実験段階**です。
-- 現在は「Mod ロード」「インゲーム Debug UI」「Lobby Host/Join の基本疎通（Hello/Welcome/Ping/Pong）」まで実装済みです。
+- 現在は「Mod ロード」「インゲーム Debug UI」「Lobby Host/Join の基本疎通（Hello/Welcome/Ping/Pong）」に加えて、Shadow World の Snapshot 同期と Build/Delete コマンド同期（ネットワーク層）を実装済みです。
 - **ホスト側の Lobby 作成ログ確認は完了**しています。
-- 建築・削除・Blueprint・Snapshot の実ワールド同期は未実装です。
+- shapez 2 実ワールドの建築/削除に直接反映する Hook は未実装です。
 
 ## 2. 前提条件（ホスト/クライアント共通）
 
@@ -67,5 +67,6 @@ aod.Shapez2Multiplayer[0.1.0] [MP_INIT] Shapez2Multiplayer initialized version=0
 
 ## 7. 注意事項
 
-- 現段階ではワールド同期機能が未実装のため、接続確認が主目的です。
+- Debug UI 下部の `Build/Delete Command Test` で、コマンド送受信と `World Revision` / `World Entities` の変化を検証できます。
+- 現段階では実ワールドへの直接反映 Hook が未実装のため、実プレイ同期ではなくネットワーク同期確認が主目的です。
 - 実験版のため、セーブデータのバックアップを推奨します。
