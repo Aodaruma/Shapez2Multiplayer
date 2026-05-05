@@ -82,7 +82,11 @@
     </Reference>
   </ItemGroup>
 
-  <Target Name="DeployToShapez2Mods" AfterTargets="Build" Condition="'$(DeployToShapez2Mods)' == 'true'">
+  <Target Name="ValidateDeploySettings" BeforeTargets="DeployToShapez2Mods" Condition="'$(DeployToShapez2Mods)' == 'true' and '$(UseGameAssemblies)' != 'true'">
+    <Error Text="DeployToShapez2Mods=true requires UseGameAssemblies=true so the runtime mod entrypoint (IMod) is included." />
+  </Target>
+
+  <Target Name="DeployToShapez2Mods" AfterTargets="Build" Condition="'$(DeployToShapez2Mods)' == 'true' and '$(UseGameAssemblies)' == 'true'">
     <MakeDir Directories="$(ModDeployDir)" />
     <Copy SourceFiles="$(TargetDir)$(AssemblyName).dll" DestinationFolder="$(ModDeployDir)" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\manifest.json" DestinationFolder="$(ModDeployDir)" />
