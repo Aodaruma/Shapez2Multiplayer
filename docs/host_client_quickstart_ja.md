@@ -68,6 +68,7 @@ aod.Shapez2Multiplayer[0.1.0] [MP_INIT] Shapez2Multiplayer initialized version=0
 - クリップボードにIDをコピーした状態で `F9`
 6. クライアント側で `Join Synced World` を押す
 7. `Status`, `Connected Peers`, `RTT` と `Player.log` を確認
+8. クライアントがメインメニュー中の場合、`Real Map Apply` は待機表示になる（ワールドを開くと自動で同期適用）
 
 ## 7. 注意事項
 

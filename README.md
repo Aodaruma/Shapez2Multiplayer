@@ -23,6 +23,7 @@ Desyncs may require rejoining the session.
 - Build/Delete コマンドの送受信・Authority 確定・配信（Shadow World 反映）を実装済み
 - shapez 2 実ワールドの `OnBuildingAdded` / `OnBeforeBuildingRemoved` をフックし、実操作から Build/Delete コマンドを自動送信
 - `Join Synced World` ボタンでクライアント側の実ワールド同期（Snapshot 適用 + 以後の確定コマンド適用）を有効化可能
+- クライアントがメインメニュー中に `Join Synced World` を押した場合は、実ワールド適用を待機し、ワールド入場後に自動反映
 - ホスト/クライアントともに UI の Build/Delete コマンドは実ワールド反映に対応
 - ワールド退出（`OnMapChanged: null`）を検知した場合は Lobby を自動離脱
 - 宇宙ビューのプラットフォーム/島配置（Island 作成・削除）同期に対応
@@ -88,6 +89,7 @@ dotnet test .\tests\Shapez2Multiplayer.Tests\Shapez2Multiplayer.Tests.csproj -c 
 - クリップボードに ID を入れた状態で `F9`
 6. `Status` / `Connected Peers` / `RTT` と `Player.log` を確認する
 7. クライアント側は `Join Synced World` を押して実ワールド同期を有効化する
+8. クライアントがメインメニューにいる場合は `Real Map Apply: waiting (currently in main menu)` と表示されるため、ワールドを開く（開いた時点で同期適用が自動再開）
 
 Build/Delete 疎通テスト:
 

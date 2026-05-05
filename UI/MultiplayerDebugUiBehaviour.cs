@@ -97,6 +97,12 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         GUILayout.Label($"Pending Commands: {session.PendingLocalCommandCount}");
         GUILayout.Label($"Last Command: {session.LastCommandSummary}");
         GUILayout.Label($"World Sync Enabled: {session.WorldSyncEnabled}");
+        GUILayout.Label($"Real Map Apply: {session.RealMapApplyStatus}");
+
+        if (session.IsInLobby && !session.IsHost && session.WorldSyncEnabled && session.RealMapApplyStatus.Contains("main menu"))
+        {
+            GUILayout.Label("Hint: Enter/load a world first. Sync apply starts automatically after map load.");
+        }
 
         GUILayout.Space(6);
         GUILayout.Label("Shadow World Entities (first 10):");

@@ -59,6 +59,12 @@ public sealed class MultiplayerSessionController : IDisposable
     private const int ShadowSnapshotApplyWarnEveryAttempts = 20;
     private const int ShadowSnapshotApplyBusyDelayMs = 200;
     private bool snapshotApplyPauseOwned;
+    private bool gameStateReflectionInitialized;
+    private FieldInfo? gameBootstrapperOrchestratorField;
+    private FieldInfo? gameOrchestratorGameField;
+    private MethodInfo? gameIsInSessionMethod;
+    private MethodInfo? gameIsInMainMenuMethod;
+    private PropertyInfo? gameCurrentStateProperty;
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -101,6 +107,24 @@ public sealed class MultiplayerSessionController : IDisposable
     public string LastCommandSummary => lastCommandSummary;
 
     public bool WorldSyncEnabled => worldSyncEnabled;
+
+    public string RealMapApplyStatus
+    {
+        get
+        {
+            if (CanApplyToRealMapNow(out string reason))
+            {
+                return "ready";
+            }
+
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return "waiting";
+            }
+
+            return $"waiting ({reason})";
+        }
+    }
 
     public bool TryHostLobby(out string message)
     {
@@ -201,7 +225,15 @@ public sealed class MultiplayerSessionController : IDisposable
             SendHello(hostSteamId);
         }
 
-        message = "World sync enabled; snapshot apply queued and host refresh requested";
+        if (!CanApplyToRealMapNow(out string readinessError))
+        {
+            message = $"World sync enabled; waiting for gameplay session before real-map apply ({readinessError})";
+        }
+        else
+        {
+            message = "World sync enabled; snapshot apply queued and host refresh requested";
+        }
+
         return true;
     }
 
@@ -1058,6 +1090,12 @@ public sealed class MultiplayerSessionController : IDisposable
             return;
         }
 
+        if (pendingShadowSnapshotApply)
+        {
+            pendingShadowSnapshotApplyReason = reason;
+            return;
+        }
+
         pendingShadowSnapshotApply = true;
         pendingShadowSnapshotApplyAttempts = 0;
         nextShadowSnapshotApplyAtMs = GetNowMs();
@@ -1082,14 +1120,22 @@ public sealed class MultiplayerSessionController : IDisposable
             return;
         }
 
-        if (trackedMap == default)
+        long now = GetNowMs();
+        if (now < nextShadowSnapshotApplyAtMs)
         {
             return;
         }
 
-        long now = GetNowMs();
-        if (now < nextShadowSnapshotApplyAtMs)
+        if (!CanApplyToRealMapNow(out string readinessError))
         {
+            pendingShadowSnapshotApplyAttempts++;
+            nextShadowSnapshotApplyAtMs = now + ShadowSnapshotApplyRetryDelayMs;
+            if (pendingShadowSnapshotApplyAttempts == 1 ||
+                pendingShadowSnapshotApplyAttempts % ShadowSnapshotApplyWarnEveryAttempts == 0)
+            {
+                logger.Info?.Log($"[MP_SNAPSHOT] Real-map apply waiting reason={pendingShadowSnapshotApplyReason} attempts={pendingShadowSnapshotApplyAttempts} blocked={readinessError}");
+            }
+
             return;
         }
 
@@ -1214,6 +1260,182 @@ public sealed class MultiplayerSessionController : IDisposable
         if (TrySetSimulationPaused(false))
         {
             logger.Info?.Log("[MP_SNAPSHOT] Restored local simulation pause state after synced-world apply");
+        }
+    }
+
+    private bool CanApplyToRealMapNow(out string reason)
+    {
+        if (trackedMap == default)
+        {
+            reason = "real map is not loaded";
+            return false;
+        }
+
+        if (!TryGetGameplaySessionState(out bool isInSession, out bool isInMainMenu, out string stateText))
+        {
+            // Fail-open if reflection probing is unavailable on a specific runtime build.
+            reason = string.Empty;
+            return true;
+        }
+
+        if (isInSession)
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        reason = isInMainMenu
+            ? "currently in main menu"
+            : $"game state is not in session ({stateText})";
+        return false;
+    }
+
+    private bool TryGetGameplaySessionState(out bool isInSession, out bool isInMainMenu, out string stateText)
+    {
+        isInSession = false;
+        isInMainMenu = false;
+        stateText = "unknown";
+
+        EnsureGameStateReflectionInitialized();
+        if (gameBootstrapperOrchestratorField is null ||
+            gameOrchestratorGameField is null ||
+            gameIsInSessionMethod is null)
+        {
+            return false;
+        }
+
+        object? orchestrator;
+        try
+        {
+            orchestrator = gameBootstrapperOrchestratorField.GetValue(null);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (orchestrator is null)
+        {
+            stateText = "orchestrator-null";
+            return true;
+        }
+
+        object? game;
+        try
+        {
+            game = gameOrchestratorGameField.GetValue(orchestrator);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (game is null)
+        {
+            stateText = "game-null";
+            return true;
+        }
+
+        try
+        {
+            if (gameIsInSessionMethod.Invoke(game, parameters: null) is bool inSession)
+            {
+                isInSession = inSession;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (gameIsInMainMenuMethod is not null)
+        {
+            try
+            {
+                if (gameIsInMainMenuMethod.Invoke(game, parameters: null) is bool inMainMenu)
+                {
+                    isInMainMenu = inMainMenu;
+                }
+            }
+            catch
+            {
+                // ignored
+            }
+        }
+
+        if (gameCurrentStateProperty is not null)
+        {
+            try
+            {
+                object? state = gameCurrentStateProperty.GetValue(game);
+                if (state is not null)
+                {
+                    string? text = state.ToString();
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        stateText = text;
+                    }
+                }
+            }
+            catch
+            {
+                // ignored
+            }
+        }
+
+        return true;
+    }
+
+    private void EnsureGameStateReflectionInitialized()
+    {
+        if (gameStateReflectionInitialized)
+        {
+            return;
+        }
+
+        gameStateReflectionInitialized = true;
+
+        const BindingFlags staticFlags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        const BindingFlags instanceFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type? bootstrapperType = asm.GetType("Game.Orchestration.GameBootstrapper", throwOnError: false)
+                ?? asm.GetType("GameBootstrapper", throwOnError: false);
+            if (bootstrapperType is null)
+            {
+                continue;
+            }
+
+            FieldInfo? orchestratorField = bootstrapperType.GetField("GameOrchestrator", staticFlags);
+            if (orchestratorField is null)
+            {
+                continue;
+            }
+
+            FieldInfo? gameField = orchestratorField.FieldType.GetField("Game", instanceFlags);
+            if (gameField is null)
+            {
+                continue;
+            }
+
+            Type gameType = gameField.FieldType;
+            MethodInfo? isInSession = gameType.GetMethod("IsGameInSession", instanceFlags, binder: null, types: Type.EmptyTypes, modifiers: null);
+            if (isInSession is null)
+            {
+                continue;
+            }
+
+            gameBootstrapperOrchestratorField = orchestratorField;
+            gameOrchestratorGameField = gameField;
+            gameIsInSessionMethod = isInSession;
+            gameIsInMainMenuMethod = gameType.GetMethod("IsGameInMainMenu", instanceFlags, binder: null, types: Type.EmptyTypes, modifiers: null);
+            gameCurrentStateProperty = gameType.GetProperty("CurrentState", instanceFlags);
+            return;
         }
     }
 
@@ -1601,9 +1823,8 @@ public sealed class MultiplayerSessionController : IDisposable
 
     private bool TryApplyCommandToRealMap(ICommand command, out string error)
     {
-        if (trackedMap == default)
+        if (!CanApplyToRealMapNow(out error))
         {
-            error = "real map is not loaded";
             return false;
         }
 
@@ -1751,9 +1972,8 @@ public sealed class MultiplayerSessionController : IDisposable
 
     private bool TryApplyShadowSnapshotToRealMap(out string error)
     {
-        if (trackedMap == default)
+        if (!CanApplyToRealMapNow(out error))
         {
-            error = "real map is not loaded";
             return false;
         }
 
@@ -2045,10 +2265,23 @@ public sealed class MultiplayerSessionController : IDisposable
         {
             if (!TryApplyCommandToRealMap(message.Command, out string applyError))
             {
-                logger.Warning?.Log($"[MP_COMMAND] Authoritative applied to shadow, but real map apply failed: {applyError}");
-                if (applyError.IndexOf("SimulationGraph is currently updating", StringComparison.OrdinalIgnoreCase) >= 0)
+                bool simulationBusy = applyError.IndexOf("SimulationGraph is currently updating", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool deferredUntilGameplay = applyError.IndexOf("currently in main menu", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    applyError.IndexOf("game state is not in session", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    applyError.IndexOf("real map is not loaded", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                if (simulationBusy || deferredUntilGameplay)
                 {
-                    QueueShadowSnapshotApply("authoritative-command-retry");
+                    QueueShadowSnapshotApply(simulationBusy ? "authoritative-command-retry" : "authoritative-command-deferred");
+                }
+
+                if (deferredUntilGameplay)
+                {
+                    logger.Info?.Log($"[MP_COMMAND] Authoritative kept in shadow world until gameplay session is active: {applyError}");
+                }
+                else
+                {
+                    logger.Warning?.Log($"[MP_COMMAND] Authoritative applied to shadow, but real map apply failed: {applyError}");
                 }
             }
         }
