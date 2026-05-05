@@ -6,8 +6,9 @@
 
 - 本 Mod は **0.1.0 の実験段階**です。
 - 現在は「Mod ロード」「インゲーム Debug UI」「Lobby Host/Join の基本疎通（Hello/Welcome/Ping/Pong）」に加えて、Shadow World の Snapshot 同期と Build/Delete コマンド同期（ネットワーク層）を実装済みです。
+- ローカルの実建築/実削除操作は `OnBuildingAdded` / `OnBeforeBuildingRemoved` フック経由で自動コマンド化されます。
 - **ホスト側の Lobby 作成ログ確認は完了**しています。
-- shapez 2 実ワールドの建築/削除に直接反映する Hook は未実装です。
+- リモート確定コマンドを shapez 2 実ワールドに適用する処理は未実装です（現在は Shadow World 反映まで）。
 
 ## 2. 前提条件（ホスト/クライアント共通）
 

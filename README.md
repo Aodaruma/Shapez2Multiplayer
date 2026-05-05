@@ -21,7 +21,8 @@ Desyncs may require rejoining the session.
 - ホスト側での Lobby 作成ログ確認は完了
 - Join 時 Snapshot（Shadow World）同期と `WorldHash` 照合ログを実装済み
 - Build/Delete コマンドの送受信・Authority 確定・配信（Shadow World 反映）を実装済み
-- shapez 2 実ワールドへの Hook 適用（実建築/実削除への直結）は未実装
+- shapez 2 実ワールドの `OnBuildingAdded` / `OnBeforeBuildingRemoved` をフックし、実操作から Build/Delete コマンドを自動送信
+- リモート確定コマンドの実ワールド反映は未実装（現在は Shadow World 反映まで）
 
 ## 必要環境
 
