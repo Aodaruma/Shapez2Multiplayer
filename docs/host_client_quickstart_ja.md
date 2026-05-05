@@ -8,7 +8,9 @@
 - 現在は「Mod ロード」「インゲーム Debug UI」「Lobby Host/Join の基本疎通（Hello/Welcome/Ping/Pong）」に加えて、Shadow World の Snapshot 同期と Build/Delete コマンド同期（ネットワーク層）を実装済みです。
 - ローカルの実建築/実削除操作は `OnBuildingAdded` / `OnBeforeBuildingRemoved` フック経由で自動コマンド化されます。
 - **ホスト側の Lobby 作成ログ確認は完了**しています。
-- リモート確定コマンドを shapez 2 実ワールドに適用する処理は未実装です（現在は Shadow World 反映まで）。
+- クライアントは `Join Synced World` ボタンで、Snapshot と確定コマンドの実ワールド適用を有効化できます。
+- ホスト/クライアントともに UI の Build/Delete コマンドは実ワールド反映に対応しています。
+- ワールド退出（`OnMapChanged: null`）を検知した場合は Lobby を自動離脱します。
 
 ## 2. 前提条件（ホスト/クライアント共通）
 
@@ -64,10 +66,11 @@ aod.Shapez2Multiplayer[0.1.0] [MP_INIT] Shapez2Multiplayer initialized version=0
 - `Join Lobby ID` にIDを貼り付けて `Join Lobby`
 - クリップボードにIDをコピーした状態で `Join From Clipboard`
 - クリップボードにIDをコピーした状態で `F9`
-6. `Status`, `Connected Peers`, `RTT` と `Player.log` を確認
+6. クライアント側で `Join Synced World` を押す
+7. `Status`, `Connected Peers`, `RTT` と `Player.log` を確認
 
 ## 7. 注意事項
 
 - Debug UI 下部の `Build/Delete Command Test` で、コマンド送受信と `World Revision` / `World Entities` の変化を検証できます。
-- 現段階では実ワールドへの直接反映 Hook が未実装のため、実プレイ同期ではなくネットワーク同期確認が主目的です。
+- 宇宙ビューのプラットフォーム/島配置（Island 作成・削除）系は未対応です。現状は Building 単位（Create/Delete）同期が対象です。
 - 実験版のため、セーブデータのバックアップを推奨します。

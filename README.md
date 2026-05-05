@@ -22,7 +22,10 @@ Desyncs may require rejoining the session.
 - Join 時 Snapshot（Shadow World）同期と `WorldHash` 照合ログを実装済み
 - Build/Delete コマンドの送受信・Authority 確定・配信（Shadow World 反映）を実装済み
 - shapez 2 実ワールドの `OnBuildingAdded` / `OnBeforeBuildingRemoved` をフックし、実操作から Build/Delete コマンドを自動送信
-- リモート確定コマンドの実ワールド反映は未実装（現在は Shadow World 反映まで）
+- `Join Synced World` ボタンでクライアント側の実ワールド同期（Snapshot 適用 + 以後の確定コマンド適用）を有効化可能
+- ホスト/クライアントともに UI の Build/Delete コマンドは実ワールド反映に対応
+- ワールド退出（`OnMapChanged: null`）を検知した場合は Lobby を自動離脱
+- 宇宙ビューのプラットフォーム/島配置（Island 作成・削除）同期は未対応（現状は Building 単位同期）
 
 ## 必要環境
 
@@ -76,6 +79,7 @@ dotnet test .\tests\Shapez2Multiplayer.Tests\Shapez2Multiplayer.Tests.csproj -c 
 - クリップボードに ID を入れた状態で `Join From Clipboard`
 - クリップボードに ID を入れた状態で `F9`
 6. `Status` / `Connected Peers` / `RTT` と `Player.log` を確認する
+7. クライアント側は `Join Synced World` を押して実ワールド同期を有効化する
 
 Build/Delete 疎通テスト:
 
