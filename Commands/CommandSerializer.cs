@@ -31,6 +31,8 @@ public static class CommandSerializer
         {
             CommandType.Build => BuildCommand.DeserializeAfterType(reader),
             CommandType.Delete => DeleteCommand.DeserializeAfterType(reader),
+            CommandType.CreateIsland => CreateIslandCommand.DeserializeAfterType(reader),
+            CommandType.DeleteIsland => DeleteIslandCommand.DeserializeAfterType(reader),
             _ => throw new InvalidDataException($"Unsupported command type: {commandType}")
         };
 

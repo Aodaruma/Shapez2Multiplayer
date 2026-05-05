@@ -9,5 +9,7 @@ public enum CommandType : ushort
     Upgrade = 5,
     GameSpeed = 6,
     Pause = 7,
-    Resume = 8
+    Resume = 8,
+    CreateIsland = 9,
+    DeleteIsland = 10
 }

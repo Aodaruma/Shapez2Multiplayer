@@ -46,6 +46,17 @@ public class WorldStateStoreTests
     {
         WorldStateStore source = new();
 
+        CreateIslandCommand island = new()
+        {
+            LocalCommandId = 10,
+            IssuerPlayerId = 2,
+            IslandDefinitionId = "island.platform.space",
+            X = 1,
+            Y = 2,
+            Z = 3,
+            Rotation = 1
+        };
+
         BuildCommand a = new()
         {
             LocalCommandId = 1,
@@ -70,6 +81,7 @@ public class WorldStateStoreTests
             Layer = 1
         };
 
+        Assert.True(source.TryApplyCommand(island, out _));
         Assert.True(source.TryApplyCommand(a, out _));
         Assert.True(source.TryApplyCommand(b, out _));
 
@@ -81,5 +93,39 @@ public class WorldStateStoreTests
 
         Assert.Equal(source.Count, target.Count);
         Assert.Equal(hashBefore, target.ComputeLayoutHash());
+    }
+
+    [Fact]
+    public void WorldStateStore_ApplyCreateAndDeleteIsland_UpdatesCount()
+    {
+        WorldStateStore store = new();
+
+        CreateIslandCommand create = new()
+        {
+            LocalCommandId = 100,
+            IssuerPlayerId = 7,
+            IslandDefinitionId = "island.platform.space",
+            X = 50,
+            Y = 60,
+            Z = 1,
+            Rotation = 2
+        };
+
+        Assert.True(store.TryApplyCommand(create, out string createError), createError);
+        Assert.Equal(1, store.Count);
+        Assert.Equal(1, store.IslandCount);
+
+        DeleteIslandCommand delete = new()
+        {
+            LocalCommandId = 101,
+            IssuerPlayerId = 7,
+            X = 50,
+            Y = 60,
+            Z = 1
+        };
+
+        Assert.True(store.TryApplyCommand(delete, out string deleteError), deleteError);
+        Assert.Equal(0, store.Count);
+        Assert.Equal(0, store.IslandCount);
     }
 }

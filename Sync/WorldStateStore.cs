@@ -3,24 +3,36 @@ using System.Collections.Generic;
 using System.Linq;
 using Shapez2Multiplayer.Commands;
 using Shapez2Multiplayer.Net;
-using Shapez2Multiplayer.Protocol;
 
 namespace Shapez2Multiplayer.Sync;
 
 public sealed class WorldStateStore
 {
-    private readonly Dictionary<WorldKey, WorldEntityState> entities = new();
+    private const int SnapshotMagicV2 = 0x4D503032; // MP02
 
-    public int Count => entities.Count;
+    private readonly Dictionary<WorldKey, WorldEntityState> entities = new();
+    private readonly Dictionary<IslandKey, WorldIslandState> islands = new();
+
+    public int Count => entities.Count + islands.Count;
+
+    public int BuildingCount => entities.Count;
+
+    public int IslandCount => islands.Count;
 
     public void Clear()
     {
         entities.Clear();
+        islands.Clear();
     }
 
     public IReadOnlyCollection<WorldEntityState> GetAllEntities()
     {
         return entities.Values;
+    }
+
+    public IReadOnlyCollection<WorldIslandState> GetAllIslands()
+    {
+        return islands.Values;
     }
 
     public bool TryApplyCommand(ICommand command, out string error)
@@ -40,6 +52,16 @@ public sealed class WorldStateStore
 
             case DeleteCommand delete:
                 ApplyDelete(delete);
+                error = string.Empty;
+                return true;
+
+            case CreateIslandCommand createIsland:
+                ApplyCreateIsland(createIsland);
+                error = string.Empty;
+                return true;
+
+            case DeleteIslandCommand deleteIsland:
+                ApplyDeleteIsland(deleteIsland);
                 error = string.Empty;
                 return true;
 
@@ -67,9 +89,34 @@ public sealed class WorldStateStore
         entities.Remove(key);
     }
 
+    public void ApplyCreateIsland(CreateIslandCommand command)
+    {
+        IslandKey key = new(command.X, command.Y, command.Z);
+        islands[key] = new WorldIslandState(
+            command.IslandDefinitionId,
+            command.X,
+            command.Y,
+            command.Z,
+            command.Rotation);
+    }
+
+    public void ApplyDeleteIsland(DeleteIslandCommand command)
+    {
+        IslandKey key = new(command.X, command.Y, command.Z);
+        islands.Remove(key);
+    }
+
     public byte[] SerializeSnapshot()
     {
-        WorldEntityState[] ordered = entities
+        WorldIslandState[] orderedIslands = islands
+            .Values
+            .OrderBy(static e => e.Z)
+            .ThenBy(static e => e.Y)
+            .ThenBy(static e => e.X)
+            .ThenBy(static e => e.IslandDefinitionId, StringComparer.Ordinal)
+            .ToArray();
+
+        WorldEntityState[] orderedBuildings = entities
             .Values
             .OrderBy(static e => e.Layer)
             .ThenBy(static e => e.Z)
@@ -78,9 +125,21 @@ public sealed class WorldStateStore
             .ThenBy(static e => e.BuildingDefinitionId, StringComparer.Ordinal)
             .ToArray();
 
-        using PacketWriter writer = new(capacity: Math.Max(128, ordered.Length * 48));
-        writer.WriteInt32(ordered.Length);
-        foreach (WorldEntityState entity in ordered)
+        using PacketWriter writer = new(capacity: Math.Max(256, (orderedIslands.Length + orderedBuildings.Length) * 64));
+        writer.WriteInt32(SnapshotMagicV2);
+
+        writer.WriteInt32(orderedIslands.Length);
+        foreach (WorldIslandState island in orderedIslands)
+        {
+            writer.WriteString(island.IslandDefinitionId, maxUtf8Bytes: 1024);
+            writer.WriteInt32(island.X);
+            writer.WriteInt32(island.Y);
+            writer.WriteInt32(island.Z);
+            writer.WriteByte(island.Rotation);
+        }
+
+        writer.WriteInt32(orderedBuildings.Length);
+        foreach (WorldEntityState entity in orderedBuildings)
         {
             writer.WriteString(entity.BuildingDefinitionId, maxUtf8Bytes: 1024);
             writer.WriteInt32(entity.X);
@@ -101,14 +160,51 @@ public sealed class WorldStateStore
         }
 
         using PacketReader reader = new(snapshot);
-        int count = reader.ReadInt32();
-        if (count < 0)
+        int first = reader.ReadInt32();
+        if (first == SnapshotMagicV2)
         {
-            throw new InvalidOperationException($"Invalid snapshot count: {count}");
+            LoadV2Snapshot(reader);
+        }
+        else
+        {
+            LoadLegacySnapshot(reader, first);
+        }
+
+        if (reader.RemainingBytes != 0)
+        {
+            throw new InvalidOperationException($"Trailing bytes in snapshot: {reader.RemainingBytes}");
+        }
+    }
+
+    private void LoadV2Snapshot(PacketReader reader)
+    {
+        int islandCount = reader.ReadInt32();
+        if (islandCount < 0)
+        {
+            throw new InvalidOperationException($"Invalid island snapshot count: {islandCount}");
+        }
+
+        islands.Clear();
+        for (int i = 0; i < islandCount; i++)
+        {
+            string islandDefinitionId = reader.ReadString(maxUtf8Bytes: 1024);
+            int x = reader.ReadInt32();
+            int y = reader.ReadInt32();
+            int z = reader.ReadInt32();
+            byte rotation = reader.ReadByte();
+
+            IslandKey key = new(x, y, z);
+            islands[key] = new WorldIslandState(islandDefinitionId, x, y, z, rotation);
+        }
+
+        int buildingCount = reader.ReadInt32();
+        if (buildingCount < 0)
+        {
+            throw new InvalidOperationException($"Invalid building snapshot count: {buildingCount}");
         }
 
         entities.Clear();
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < buildingCount; i++)
         {
             string buildingDefinitionId = reader.ReadString(maxUtf8Bytes: 1024);
             int x = reader.ReadInt32();
@@ -120,10 +216,28 @@ public sealed class WorldStateStore
             WorldKey key = new(x, y, z, layer);
             entities[key] = new WorldEntityState(buildingDefinitionId, x, y, z, rotation, layer);
         }
+    }
 
-        if (reader.RemainingBytes != 0)
+    private void LoadLegacySnapshot(PacketReader reader, int firstCount)
+    {
+        if (firstCount < 0)
         {
-            throw new InvalidOperationException($"Trailing bytes in snapshot: {reader.RemainingBytes}");
+            throw new InvalidOperationException($"Invalid legacy snapshot count: {firstCount}");
+        }
+
+        islands.Clear();
+        entities.Clear();
+        for (int i = 0; i < firstCount; i++)
+        {
+            string buildingDefinitionId = reader.ReadString(maxUtf8Bytes: 1024);
+            int x = reader.ReadInt32();
+            int y = reader.ReadInt32();
+            int z = reader.ReadInt32();
+            byte rotation = reader.ReadByte();
+            byte layer = reader.ReadByte();
+
+            WorldKey key = new(x, y, z, layer);
+            entities[key] = new WorldEntityState(buildingDefinitionId, x, y, z, rotation, layer);
         }
     }
 
@@ -133,6 +247,22 @@ public sealed class WorldStateStore
         const ulong prime = 1099511628211UL;
 
         ulong hash = offset;
+
+        foreach (WorldIslandState island in islands
+                     .Values
+                     .OrderBy(static e => e.Z)
+                     .ThenBy(static e => e.Y)
+                     .ThenBy(static e => e.X)
+                     .ThenBy(static e => e.IslandDefinitionId, StringComparer.Ordinal))
+        {
+            AppendByte(1);
+            AppendString(island.IslandDefinitionId);
+            AppendInt(island.X);
+            AppendInt(island.Y);
+            AppendInt(island.Z);
+            AppendByte(island.Rotation);
+        }
+
         foreach (WorldEntityState entity in entities
                      .Values
                      .OrderBy(static e => e.Layer)
@@ -141,6 +271,7 @@ public sealed class WorldStateStore
                      .ThenBy(static e => e.X)
                      .ThenBy(static e => e.BuildingDefinitionId, StringComparer.Ordinal))
         {
+            AppendByte(2);
             AppendString(entity.BuildingDefinitionId);
             AppendInt(entity.X);
             AppendInt(entity.Y);
@@ -210,6 +341,37 @@ public sealed class WorldStateStore
         public override int GetHashCode()
         {
             return HashCode.Combine(X, Y, Z, Layer);
+        }
+    }
+
+    private readonly struct IslandKey : IEquatable<IslandKey>
+    {
+        public IslandKey(int x, int y, int z)
+        {
+            X = x;
+            Y = y;
+            Z = z;
+        }
+
+        public int X { get; }
+
+        public int Y { get; }
+
+        public int Z { get; }
+
+        public bool Equals(IslandKey other)
+        {
+            return X == other.X && Y == other.Y && Z == other.Z;
+        }
+
+        public override bool Equals(object? obj)
+        {
+            return obj is IslandKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(X, Y, Z);
         }
     }
 }

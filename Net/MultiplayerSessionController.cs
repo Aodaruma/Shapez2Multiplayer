@@ -28,7 +28,9 @@ public sealed class MultiplayerSessionController : IDisposable
     private readonly Dictionary<ulong, int> peerRtts = new();
     private readonly Dictionary<ulong, SnapshotReceiveBuffer> snapshotBuffers = new();
     private readonly HashSet<BuildingId> observedBuildingIds = new();
+    private readonly HashSet<IslandId> observedIslandIds = new();
     private readonly Dictionary<string, IBuildingDefinition> knownBuildingDefinitions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IIslandDefinition> knownIslandDefinitions = new(StringComparer.Ordinal);
 
     private bool disposed;
     private uint nextSequence;
@@ -249,6 +251,43 @@ public sealed class MultiplayerSessionController : IDisposable
         return TrySendCommand(command, fromMapHook, out message);
     }
 
+    private bool TrySendCreateIslandCommandInternal(string islandDefinitionId, int x, int y, int z, byte rotation, bool fromMapHook, out string message)
+    {
+        if (string.IsNullOrWhiteSpace(islandDefinitionId))
+        {
+            message = "CreateIsland failed: island id is empty";
+            logger.Warning?.Log($"[MP_COMMAND] {message}");
+            return false;
+        }
+
+        CreateIslandCommand command = new()
+        {
+            LocalCommandId = nextLocalCommandId++,
+            IssuerPlayerId = GetLocalPlayerId(),
+            IslandDefinitionId = islandDefinitionId.Trim(),
+            X = x,
+            Y = y,
+            Z = z,
+            Rotation = rotation
+        };
+
+        return TrySendCommand(command, fromMapHook, out message);
+    }
+
+    private bool TrySendDeleteIslandCommandInternal(int x, int y, int z, bool fromMapHook, out string message)
+    {
+        DeleteIslandCommand command = new()
+        {
+            LocalCommandId = nextLocalCommandId++,
+            IssuerPlayerId = GetLocalPlayerId(),
+            X = x,
+            Y = y,
+            Z = z
+        };
+
+        return TrySendCommand(command, fromMapHook, out message);
+    }
+
     public void LeaveLobby()
     {
         if (!IsInLobby)
@@ -331,7 +370,9 @@ public sealed class MultiplayerSessionController : IDisposable
         autoLeaveOnNullMapAtMs = 0;
         mapHooksReady = false;
         observedBuildingIds.Clear();
+        observedIslandIds.Clear();
         knownBuildingDefinitions.Clear();
+        knownIslandDefinitions.Clear();
 
         if (isHost)
         {
@@ -398,6 +439,7 @@ public sealed class MultiplayerSessionController : IDisposable
         UnbindTrackedMapEvents();
         trackedMap = map;
         observedBuildingIds.Clear();
+        observedIslandIds.Clear();
 
         if (trackedMap == default)
         {
@@ -420,6 +462,14 @@ public sealed class MultiplayerSessionController : IDisposable
 
         trackedMap.OnBuildingAdded.Register(HandleMapBuildingAdded);
         trackedMap.OnBeforeBuildingRemoved.Register(HandleMapBeforeBuildingRemoved);
+        trackedMap.OnIslandAdded.Register(HandleMapIslandAdded);
+        trackedMap.OnBeforeIslandRemoved.Register(HandleMapBeforeIslandRemoved);
+
+        foreach (IslandModel island in trackedMap.Islands)
+        {
+            observedIslandIds.Add(island.Id);
+            CacheKnownIslandDefinition(island.Definition);
+        }
 
         foreach (BuildingModel building in trackedMap.Buildings)
         {
@@ -429,7 +479,7 @@ public sealed class MultiplayerSessionController : IDisposable
 
         mapHooksReady = true;
         mapEventSuppressionUntilMs = GetNowMs() + 2000;
-        logger.Info?.Log($"[MP_HOOK] Map hooks ready. existingBuildings={observedBuildingIds.Count}");
+        logger.Info?.Log($"[MP_HOOK] Map hooks ready. existingIslands={observedIslandIds.Count} existingBuildings={observedBuildingIds.Count}");
 
         if (IsHost && worldSyncEnabled)
         {
@@ -453,6 +503,8 @@ public sealed class MultiplayerSessionController : IDisposable
 
         trackedMap.OnBuildingAdded.TryUnregister(HandleMapBuildingAdded);
         trackedMap.OnBeforeBuildingRemoved.TryUnregister(HandleMapBeforeBuildingRemoved);
+        trackedMap.OnIslandAdded.TryUnregister(HandleMapIslandAdded);
+        trackedMap.OnBeforeIslandRemoved.TryUnregister(HandleMapBeforeIslandRemoved);
         trackedMap = default;
     }
 
@@ -875,6 +927,70 @@ public sealed class MultiplayerSessionController : IDisposable
         logger.Info?.Log($"[MP_HOOK] Auto delete command sent pos=({bx},{by},{bz}) layer={layer} msg={message}");
     }
 
+    private void HandleMapIslandAdded(IslandModel island)
+    {
+        CacheKnownIslandDefinition(island.Definition);
+
+        if (!mapHooksReady || suppressMapEventCommands || !IsInLobby)
+        {
+            observedIslandIds.Add(island.Id);
+            return;
+        }
+
+        if (GetNowMs() < mapEventSuppressionUntilMs)
+        {
+            observedIslandIds.Add(island.Id);
+            return;
+        }
+
+        if (!observedIslandIds.Add(island.Id))
+        {
+            return;
+        }
+
+        int ix = island.Position.x;
+        int iy = island.Position.y;
+        short iz = island.Position.z;
+        byte rotation = (byte)island.Rotation.Value;
+        string definitionId = island.DefinitionId.ToString();
+
+        if (!TrySendCreateIslandCommandInternal(definitionId, ix, iy, iz, rotation, fromMapHook: true, out string message))
+        {
+            logger.Warning?.Log($"[MP_HOOK] Auto create island command failed id={definitionId} pos=({ix},{iy},{iz}) rot={rotation} reason={message}");
+            return;
+        }
+
+        logger.Info?.Log($"[MP_HOOK] Auto create island command sent id={definitionId} pos=({ix},{iy},{iz}) rot={rotation} msg={message}");
+    }
+
+    private void HandleMapBeforeIslandRemoved(IslandModel island)
+    {
+        if (!mapHooksReady || suppressMapEventCommands || !IsInLobby)
+        {
+            observedIslandIds.Remove(island.Id);
+            return;
+        }
+
+        if (GetNowMs() < mapEventSuppressionUntilMs)
+        {
+            observedIslandIds.Remove(island.Id);
+            return;
+        }
+
+        observedIslandIds.Remove(island.Id);
+
+        int ix = island.Position.x;
+        int iy = island.Position.y;
+        short iz = island.Position.z;
+        if (!TrySendDeleteIslandCommandInternal(ix, iy, iz, fromMapHook: true, out string message))
+        {
+            logger.Warning?.Log($"[MP_HOOK] Auto delete island command failed pos=({ix},{iy},{iz}) reason={message}");
+            return;
+        }
+
+        logger.Info?.Log($"[MP_HOOK] Auto delete island command sent pos=({ix},{iy},{iz}) msg={message}");
+    }
+
     private static byte ToLayerByte(short z)
     {
         if (z < byte.MinValue)
@@ -930,6 +1046,25 @@ public sealed class MultiplayerSessionController : IDisposable
         }
 
         worldState.Clear();
+        foreach (IslandModel island in trackedMap.Islands)
+        {
+            CacheKnownIslandDefinition(island.Definition);
+            int ix = island.Position.x;
+            int iy = island.Position.y;
+            short iz = island.Position.z;
+            CreateIslandCommand command = new()
+            {
+                LocalCommandId = 0,
+                IssuerPlayerId = 0,
+                IslandDefinitionId = island.DefinitionId.ToString(),
+                X = ix,
+                Y = iy,
+                Z = iz,
+                Rotation = (byte)island.Rotation.Value
+            };
+            worldState.ApplyCreateIsland(command);
+        }
+
         foreach (BuildingModel building in trackedMap.Buildings)
         {
             CacheKnownBuildingDefinition(building.Definition);
@@ -971,6 +1106,22 @@ public sealed class MultiplayerSessionController : IDisposable
         }
 
         knownBuildingDefinitions[definitionId] = definition;
+    }
+
+    private void CacheKnownIslandDefinition(IIslandDefinition definition)
+    {
+        if (definition is null)
+        {
+            return;
+        }
+
+        string definitionId = definition.Id.ToString();
+        if (string.IsNullOrWhiteSpace(definitionId))
+        {
+            return;
+        }
+
+        knownIslandDefinitions[definitionId] = definition;
     }
 
     private bool TryResolveBuildingDefinition(string definitionId, out IBuildingDefinition definition)
@@ -1041,6 +1192,74 @@ public sealed class MultiplayerSessionController : IDisposable
         return false;
     }
 
+    private bool TryResolveIslandDefinition(string definitionId, out IIslandDefinition definition)
+    {
+        definition = default!;
+        if (string.IsNullOrWhiteSpace(definitionId))
+        {
+            return false;
+        }
+
+        if (knownIslandDefinitions.TryGetValue(definitionId, out IIslandDefinition known))
+        {
+            definition = known;
+            return true;
+        }
+
+        if (TryResolveIslandDefinitionViaGameMode(definitionId, out IIslandDefinition resolved))
+        {
+            definition = resolved;
+            knownIslandDefinitions[definitionId] = resolved;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryResolveIslandDefinitionViaGameMode(string definitionId, out IIslandDefinition definition)
+    {
+        definition = default!;
+        if (!StaticGameCoreAccessor.HasInstance())
+        {
+            return false;
+        }
+
+        object? mode = StaticGameCoreAccessor.G?.Mode;
+        if (mode is null)
+        {
+            return false;
+        }
+
+        FieldInfo? islandsField = mode.GetType().GetField("Islands", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        object? islands = islandsField?.GetValue(mode);
+        if (islands is null)
+        {
+            return false;
+        }
+
+        MethodInfo? tryGetDefinition = islands.GetType().GetMethod(
+            "TryGetDefinition",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(IslandDefinitionId), typeof(IIslandDefinition).MakeByRefType() },
+            modifiers: null);
+
+        if (tryGetDefinition is null)
+        {
+            return false;
+        }
+
+        object?[] args = new object?[] { new IslandDefinitionId(definitionId), null };
+        object? result = tryGetDefinition.Invoke(islands, args);
+        if (result is bool ok && ok && args[1] is IIslandDefinition resolved)
+        {
+            definition = resolved;
+            return true;
+        }
+
+        return false;
+    }
+
     private bool TryApplyCommandToRealMap(ICommand command, out string error)
     {
         if (trackedMap == default)
@@ -1057,10 +1276,16 @@ public sealed class MultiplayerSessionController : IDisposable
             {
                 BuildCommand build => TryApplyBuildToRealMapCore(build, out localError),
                 DeleteCommand delete => TryApplyDeleteToRealMapCore(delete, out localError),
+                CreateIslandCommand createIsland => TryApplyCreateIslandToRealMapCore(createIsland, out localError),
+                DeleteIslandCommand deleteIsland => TryApplyDeleteIslandToRealMapCore(deleteIsland, out localError),
                 _ => false
             };
 
-            if (!success && command is not BuildCommand && command is not DeleteCommand)
+            if (!success &&
+                command is not BuildCommand &&
+                command is not DeleteCommand &&
+                command is not CreateIslandCommand &&
+                command is not DeleteIslandCommand)
             {
                 localError = $"unsupported command type for real map apply: {command.Type}";
             }
@@ -1126,6 +1351,57 @@ public sealed class MultiplayerSessionController : IDisposable
         return true;
     }
 
+    private bool TryApplyCreateIslandToRealMapCore(CreateIslandCommand command, out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        if (!TryResolveIslandDefinition(command.IslandDefinitionId, out IIslandDefinition definition))
+        {
+            error = $"island definition not found: {command.IslandDefinitionId}";
+            return false;
+        }
+
+        if (!TryMakeGlobalChunkTransform(command.X, command.Y, command.Z, command.Rotation, out Game.Core.Coordinates.GlobalChunkTransform transform, out error))
+        {
+            return false;
+        }
+
+        IIslandConfiguration configuration = default!;
+        _ = definition.TryCreateConfiguration(out configuration);
+
+        trackedMap.CreateIsland(definition, transform, configuration);
+        return true;
+    }
+
+    private bool TryApplyDeleteIslandToRealMapCore(DeleteIslandCommand command, out string error)
+    {
+        if (trackedMap == default)
+        {
+            error = "real map is not loaded";
+            return false;
+        }
+
+        if (!TryMakeGlobalChunkCoordinate(command.X, command.Y, command.Z, out Game.Core.Coordinates.GlobalChunkCoordinate position, out error))
+        {
+            return false;
+        }
+
+        if (!trackedMap.TryGetIsland(position, out IslandModel island))
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        IslandId id = island.Id;
+        trackedMap.DeleteIsland(ref id);
+        error = string.Empty;
+        return true;
+    }
+
     private bool TryApplyShadowSnapshotToRealMap(out string error)
     {
         if (trackedMap == default)
@@ -1133,6 +1409,18 @@ public sealed class MultiplayerSessionController : IDisposable
             error = "real map is not loaded";
             return false;
         }
+
+        List<WorldIslandState> islands = new(worldState.GetAllIslands());
+        islands.Sort(static (a, b) =>
+        {
+            int cmp = a.Z.CompareTo(b.Z);
+            if (cmp != 0) return cmp;
+            cmp = a.Y.CompareTo(b.Y);
+            if (cmp != 0) return cmp;
+            cmp = a.X.CompareTo(b.X);
+            if (cmp != 0) return cmp;
+            return StringComparer.Ordinal.Compare(a.IslandDefinitionId, b.IslandDefinitionId);
+        });
 
         List<WorldEntityState> entities = new(worldState.GetAllEntities());
         entities.Sort(static (a, b) =>
@@ -1156,6 +1444,26 @@ public sealed class MultiplayerSessionController : IDisposable
             {
                 success = false;
                 return;
+            }
+
+            foreach (WorldIslandState island in islands)
+            {
+                CreateIslandCommand command = new()
+                {
+                    LocalCommandId = 0,
+                    IssuerPlayerId = 0,
+                    IslandDefinitionId = island.IslandDefinitionId,
+                    X = island.X,
+                    Y = island.Y,
+                    Z = island.Z,
+                    Rotation = island.Rotation
+                };
+
+                if (!TryApplyCreateIslandToRealMapCore(command, out localError))
+                {
+                    success = false;
+                    return;
+                }
             }
 
             foreach (WorldEntityState entity in entities)
@@ -1185,7 +1493,7 @@ public sealed class MultiplayerSessionController : IDisposable
         if (success)
         {
             mapEventSuppressionUntilMs = GetNowMs() + 2000;
-            logger.Info?.Log($"[MP_HOOK] Applied shadow snapshot to real map entities={entities.Count}");
+            logger.Info?.Log($"[MP_HOOK] Applied shadow snapshot to real map islands={islands.Count} buildings={entities.Count}");
         }
 
         return success;
@@ -1209,6 +1517,18 @@ public sealed class MultiplayerSessionController : IDisposable
         {
             BuildingId id = target;
             trackedMap.DeleteBuilding(ref id);
+        }
+
+        List<IslandId> islandsToDelete = new();
+        foreach (IslandModel island in trackedMap.Islands)
+        {
+            islandsToDelete.Add(island.Id);
+        }
+
+        foreach (IslandId target in islandsToDelete)
+        {
+            IslandId id = target;
+            trackedMap.DeleteIsland(ref id);
         }
 
         error = string.Empty;
@@ -1246,6 +1566,20 @@ public sealed class MultiplayerSessionController : IDisposable
         return true;
     }
 
+    private static bool TryMakeGlobalChunkCoordinate(int x, int y, int z, out Game.Core.Coordinates.GlobalChunkCoordinate coordinate, out string error)
+    {
+        if (z < short.MinValue || z > short.MaxValue)
+        {
+            coordinate = default;
+            error = $"z out of range for short: {z}";
+            return false;
+        }
+
+        coordinate = new Game.Core.Coordinates.GlobalChunkCoordinate(x, y, (short)z);
+        error = string.Empty;
+        return true;
+    }
+
     private static bool TryMakeGlobalTransform(int x, int y, int z, byte rotation, out Game.Core.Coordinates.GlobalTileTransform transform, out string error)
     {
         if (!TryMakeGlobalCoordinate(x, y, z, out Game.Core.Coordinates.GlobalTileCoordinate coordinate, out error))
@@ -1255,6 +1589,20 @@ public sealed class MultiplayerSessionController : IDisposable
         }
 
         transform = new Game.Core.Coordinates.GlobalTileTransform(
+            coordinate,
+            new Game.Core.Coordinates.GridRotation(rotation));
+        return true;
+    }
+
+    private static bool TryMakeGlobalChunkTransform(int x, int y, int z, byte rotation, out Game.Core.Coordinates.GlobalChunkTransform transform, out string error)
+    {
+        if (!TryMakeGlobalChunkCoordinate(x, y, z, out Game.Core.Coordinates.GlobalChunkCoordinate coordinate, out error))
+        {
+            transform = default;
+            return false;
+        }
+
+        transform = new Game.Core.Coordinates.GlobalChunkTransform(
             coordinate,
             new Game.Core.Coordinates.GridRotation(rotation));
         return true;
@@ -1611,6 +1959,8 @@ public sealed class MultiplayerSessionController : IDisposable
         {
             BuildCommand build => $"Build {build.BuildingDefinitionId} ({build.X},{build.Y},{build.Z}) rot={build.Rotation} layer={build.Layer}",
             DeleteCommand delete => $"Delete ({delete.X},{delete.Y},{delete.Z}) layer={delete.Layer}",
+            CreateIslandCommand createIsland => $"CreateIsland {createIsland.IslandDefinitionId} ({createIsland.X},{createIsland.Y},{createIsland.Z}) rot={createIsland.Rotation}",
+            DeleteIslandCommand deleteIsland => $"DeleteIsland ({deleteIsland.X},{deleteIsland.Y},{deleteIsland.Z})",
             _ => command.Type.ToString()
         };
     }
