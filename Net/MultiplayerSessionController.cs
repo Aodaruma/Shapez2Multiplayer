@@ -26,6 +26,7 @@ public sealed class MultiplayerSessionController : IDisposable
     private readonly Dictionary<uint, PendingLocalCommand> pendingLocalCommands = new();
     private readonly Dictionary<ulong, int> peerRtts = new();
     private readonly Dictionary<ulong, SnapshotReceiveBuffer> snapshotBuffers = new();
+    private readonly HashSet<BuildingId> observedBuildingIds = new();
 
     private bool disposed;
     private uint nextSequence;
@@ -37,6 +38,11 @@ public sealed class MultiplayerSessionController : IDisposable
     private long nextPingAtMs;
     private long nextStatusLogAtMs;
     private string lastCommandSummary = "N/A";
+    private bool mapHooksReady;
+    private bool suppressMapEventCommands = false;
+    private Player? trackedLocalPlayer;
+    private IMapModel? trackedMap;
+    private long mapEventSuppressionUntilMs;
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -201,6 +207,7 @@ public sealed class MultiplayerSessionController : IDisposable
         localWorldRevision = 0;
         nextGlobalSequence = 0;
         lastCommandSummary = "N/A";
+        UnbindMapHooks();
     }
 
     public void Tick()
@@ -214,6 +221,8 @@ public sealed class MultiplayerSessionController : IDisposable
         {
             return;
         }
+
+        UpdateMapHooks();
 
         PumpIncomingPackets();
         SendPeriodicPings();
@@ -232,6 +241,7 @@ public sealed class MultiplayerSessionController : IDisposable
         SteamNetworking.OnP2PSessionRequest -= HandleP2PSessionRequest;
         SteamNetworking.OnP2PConnectionFailed -= HandleP2PConnectionFailed;
         SteamMatchmaking.OnLobbyMemberJoined -= HandleLobbyMemberJoined;
+        UnbindMapHooks();
         LeaveLobby();
     }
 
@@ -248,6 +258,8 @@ public sealed class MultiplayerSessionController : IDisposable
         localWorldRevision = 0;
         nextGlobalSequence = 0;
         lastCommandSummary = "N/A";
+        mapHooksReady = false;
+        observedBuildingIds.Clear();
 
         if (isHost)
         {
@@ -267,6 +279,91 @@ public sealed class MultiplayerSessionController : IDisposable
         pendingLocalCommands.Clear();
         snapshotBuffers.Clear();
         snapshotSentPeers.Clear();
+    }
+
+    private void UpdateMapHooks()
+    {
+        if (!IsInLobby || !StaticGameCoreAccessor.HasInstance())
+        {
+            return;
+        }
+
+        Player? localPlayer = StaticGameCoreAccessor.G?.LocalPlayer;
+        if (localPlayer is null)
+        {
+            return;
+        }
+
+        if (trackedLocalPlayer != localPlayer)
+        {
+            if (trackedLocalPlayer is not null)
+            {
+                trackedLocalPlayer.OnMapChanged.TryUnregister(HandleLocalPlayerMapChanged);
+            }
+
+            trackedLocalPlayer = localPlayer;
+            trackedLocalPlayer.OnMapChanged.Register(HandleLocalPlayerMapChanged);
+            mapHooksReady = false;
+            observedBuildingIds.Clear();
+            logger.Info?.Log("[MP_HOOK] Attached LocalPlayer.OnMapChanged");
+        }
+
+        IMapModel currentMap = localPlayer.CurrentMap;
+        if (currentMap != default && !ReferenceEquals(currentMap, trackedMap))
+        {
+            HandleLocalPlayerMapChanged(currentMap);
+        }
+    }
+
+    private void HandleLocalPlayerMapChanged(IMapModel map)
+    {
+        UnbindTrackedMapEvents();
+        trackedMap = map;
+        observedBuildingIds.Clear();
+
+        if (trackedMap == default)
+        {
+            mapHooksReady = false;
+            logger.Info?.Log("[MP_HOOK] MapChanged: null map");
+            return;
+        }
+
+        trackedMap.OnBuildingAdded.Register(HandleMapBuildingAdded);
+        trackedMap.OnBeforeBuildingRemoved.Register(HandleMapBeforeBuildingRemoved);
+
+        foreach (BuildingModel building in trackedMap.Buildings)
+        {
+            observedBuildingIds.Add(building.Id);
+        }
+
+        mapHooksReady = true;
+        mapEventSuppressionUntilMs = GetNowMs() + 2000;
+        logger.Info?.Log($"[MP_HOOK] Map hooks ready. existingBuildings={observedBuildingIds.Count}");
+    }
+
+    private void UnbindTrackedMapEvents()
+    {
+        if (trackedMap == default)
+        {
+            return;
+        }
+
+        trackedMap.OnBuildingAdded.TryUnregister(HandleMapBuildingAdded);
+        trackedMap.OnBeforeBuildingRemoved.TryUnregister(HandleMapBeforeBuildingRemoved);
+        trackedMap = default;
+    }
+
+    private void UnbindMapHooks()
+    {
+        UnbindTrackedMapEvents();
+        if (trackedLocalPlayer is not null)
+        {
+            trackedLocalPlayer.OnMapChanged.TryUnregister(HandleLocalPlayerMapChanged);
+            trackedLocalPlayer = null;
+        }
+
+        mapHooksReady = false;
+        observedBuildingIds.Clear();
     }
 
     private bool TrySendCommand(ICommand command, out string message)
@@ -588,6 +685,86 @@ public sealed class MultiplayerSessionController : IDisposable
             peerRtts[senderSteamId] = rtt;
             logger.Info?.Log($"[MP_NET] RTT peer={senderSteamId} rttMs={rtt}");
         }
+    }
+
+    private void HandleMapBuildingAdded(BuildingModel building)
+    {
+        if (!mapHooksReady || suppressMapEventCommands || !IsInLobby)
+        {
+            observedBuildingIds.Add(building.Id);
+            return;
+        }
+
+        if (GetNowMs() < mapEventSuppressionUntilMs)
+        {
+            observedBuildingIds.Add(building.Id);
+            return;
+        }
+
+        if (!observedBuildingIds.Add(building.Id))
+        {
+            return;
+        }
+
+        short bx = building.Transform_I.Position.x;
+        short by = building.Transform_I.Position.y;
+        short bz = building.Transform_I.Position.z;
+        byte rotation = (byte)building.Transform_I.Rotation.Value;
+        byte layer = ToLayerByte(bz);
+        string definitionId = building.Definition.Id.ToString();
+
+        if (!TrySendBuildCommand(definitionId, bx, by, bz, rotation, layer, out string message))
+        {
+            logger.Warning?.Log($"[MP_HOOK] Auto build command failed id={definitionId} pos=({bx},{by},{bz}) rot={rotation} layer={layer} reason={message}");
+            return;
+        }
+
+        logger.Info?.Log($"[MP_HOOK] Auto build command sent id={definitionId} pos=({bx},{by},{bz}) rot={rotation} layer={layer} msg={message}");
+    }
+
+    private void HandleMapBeforeBuildingRemoved(BuildingModel building)
+    {
+        if (!mapHooksReady || suppressMapEventCommands || !IsInLobby)
+        {
+            observedBuildingIds.Remove(building.Id);
+            return;
+        }
+
+        if (GetNowMs() < mapEventSuppressionUntilMs)
+        {
+            observedBuildingIds.Remove(building.Id);
+            return;
+        }
+
+        observedBuildingIds.Remove(building.Id);
+
+        short bx = building.Transform_I.Position.x;
+        short by = building.Transform_I.Position.y;
+        short bz = building.Transform_I.Position.z;
+        byte layer = ToLayerByte(bz);
+
+        if (!TrySendDeleteCommand(bx, by, bz, layer, out string message))
+        {
+            logger.Warning?.Log($"[MP_HOOK] Auto delete command failed pos=({bx},{by},{bz}) layer={layer} reason={message}");
+            return;
+        }
+
+        logger.Info?.Log($"[MP_HOOK] Auto delete command sent pos=({bx},{by},{bz}) layer={layer} msg={message}");
+    }
+
+    private static byte ToLayerByte(short z)
+    {
+        if (z < byte.MinValue)
+        {
+            return byte.MinValue;
+        }
+
+        if (z > byte.MaxValue)
+        {
+            return byte.MaxValue;
+        }
+
+        return (byte)z;
     }
 
     private bool TryAcceptAndBroadcastCommand(uint issuerPlayerId, ulong issuerSteamId, ICommand command, out string error)

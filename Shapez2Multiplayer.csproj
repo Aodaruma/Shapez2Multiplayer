@@ -48,6 +48,34 @@
       <HintPath>$(GameManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Game.Core.Coordinates">
+      <HintPath>$(GameManagedDir)\Game.Core.Coordinates.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Game.Core">
+      <HintPath>$(GameManagedDir)\Game.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Game.Core.Map">
+      <HintPath>$(GameManagedDir)\Game.Core.Map.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Game.Core.Map.Layout">
+      <HintPath>$(GameManagedDir)\Game.Core.Map.Layout.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Game.Core.Map.Model">
+      <HintPath>$(GameManagedDir)\Game.Core.Map.Model.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Game.Core.Map.Simulation">
+      <HintPath>$(GameManagedDir)\Game.Core.Map.Simulation.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SPZGameAssembly">
+      <HintPath>$(GameManagedDir)\SPZGameAssembly.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="ShapezShifter">
       <HintPath>$(ShapezShifterDir)\ShapezShifter.dll</HintPath>
       <Private>false</Private>
