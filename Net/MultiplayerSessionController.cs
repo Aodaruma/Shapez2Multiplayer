@@ -881,10 +881,10 @@ public sealed class MultiplayerSessionController : IDisposable
             return;
         }
 
-        short bx = building.Transform_I.Position.x;
-        short by = building.Transform_I.Position.y;
-        short bz = building.Transform_I.Position.z;
-        byte rotation = (byte)building.Transform_I.Rotation.Value;
+        int bx = building.Tile_G.x;
+        int by = building.Tile_G.y;
+        short bz = building.Tile_G.z;
+        byte rotation = (byte)building.Rotation_G.Value;
         byte layer = ToLayerByte(bz);
         string definitionId = building.Definition.Id.ToString();
 
@@ -913,9 +913,9 @@ public sealed class MultiplayerSessionController : IDisposable
 
         observedBuildingIds.Remove(building.Id);
 
-        short bx = building.Transform_I.Position.x;
-        short by = building.Transform_I.Position.y;
-        short bz = building.Transform_I.Position.z;
+        int bx = building.Tile_G.x;
+        int by = building.Tile_G.y;
+        short bz = building.Tile_G.z;
         byte layer = ToLayerByte(bz);
 
         if (!TrySendDeleteCommandInternal(bx, by, bz, layer, fromMapHook: true, out string message))
@@ -1068,9 +1068,9 @@ public sealed class MultiplayerSessionController : IDisposable
         foreach (BuildingModel building in trackedMap.Buildings)
         {
             CacheKnownBuildingDefinition(building.Definition);
-            short bx = building.Transform_I.Position.x;
-            short by = building.Transform_I.Position.y;
-            short bz = building.Transform_I.Position.z;
+            int bx = building.Tile_G.x;
+            int by = building.Tile_G.y;
+            short bz = building.Tile_G.z;
             BuildCommand command = new()
             {
                 LocalCommandId = 0,
@@ -1079,7 +1079,7 @@ public sealed class MultiplayerSessionController : IDisposable
                 X = bx,
                 Y = by,
                 Z = bz,
-                Rotation = (byte)building.Transform_I.Rotation.Value,
+                Rotation = (byte)building.Rotation_G.Value,
                 Layer = ToLayerByte(bz),
                 ExtraPayload = Array.Empty<byte>()
             };
