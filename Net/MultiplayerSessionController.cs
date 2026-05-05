@@ -36,6 +36,7 @@ public sealed class MultiplayerSessionController : IDisposable
     private ulong localWorldRevision;
     private long nextPingAtMs;
     private long nextStatusLogAtMs;
+    private string lastCommandSummary = "N/A";
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -74,6 +75,8 @@ public sealed class MultiplayerSessionController : IDisposable
     public int WorldEntityCount => worldState.Count;
 
     public int PendingLocalCommandCount => pendingLocalCommands.Count;
+
+    public string LastCommandSummary => lastCommandSummary;
 
     public bool TryHostLobby(out string message)
     {
@@ -197,6 +200,7 @@ public sealed class MultiplayerSessionController : IDisposable
         worldState.Clear();
         localWorldRevision = 0;
         nextGlobalSequence = 0;
+        lastCommandSummary = "N/A";
     }
 
     public void Tick()
@@ -243,6 +247,7 @@ public sealed class MultiplayerSessionController : IDisposable
         worldState.Clear();
         localWorldRevision = 0;
         nextGlobalSequence = 0;
+        lastCommandSummary = "N/A";
 
         if (isHost)
         {
@@ -611,6 +616,7 @@ public sealed class MultiplayerSessionController : IDisposable
 
         nextGlobalSequence++;
         localWorldRevision++;
+        lastCommandSummary = $"HostAccepted {FormatCommand(command)} rev={localWorldRevision}";
 
         AuthoritativeCommandMessage authoritative = new(nextGlobalSequence, localWorldRevision, command);
         byte[] payload = authoritative.Serialize();
@@ -642,6 +648,7 @@ public sealed class MultiplayerSessionController : IDisposable
         }
 
         localWorldRevision = message.WorldRevision;
+        lastCommandSummary = $"AuthoritativeApply {FormatCommand(message.Command)} rev={message.WorldRevision}";
         if (message.GlobalSequence > nextGlobalSequence)
         {
             nextGlobalSequence = message.GlobalSequence;
@@ -881,6 +888,45 @@ public sealed class MultiplayerSessionController : IDisposable
         {
             yield return $"{kv.Key}:{kv.Value}";
         }
+    }
+
+    public IReadOnlyList<WorldEntityState> GetDebugWorldEntities(int maxCount)
+    {
+        if (maxCount <= 0)
+        {
+            return Array.Empty<WorldEntityState>();
+        }
+
+        List<WorldEntityState> list = new(worldState.GetAllEntities());
+        list.Sort(static (a, b) =>
+        {
+            int cmp = a.Layer.CompareTo(b.Layer);
+            if (cmp != 0) return cmp;
+            cmp = a.Z.CompareTo(b.Z);
+            if (cmp != 0) return cmp;
+            cmp = a.Y.CompareTo(b.Y);
+            if (cmp != 0) return cmp;
+            cmp = a.X.CompareTo(b.X);
+            if (cmp != 0) return cmp;
+            return StringComparer.Ordinal.Compare(a.BuildingDefinitionId, b.BuildingDefinitionId);
+        });
+
+        if (list.Count > maxCount)
+        {
+            list.RemoveRange(maxCount, list.Count - maxCount);
+        }
+
+        return list;
+    }
+
+    private static string FormatCommand(ICommand command)
+    {
+        return command switch
+        {
+            BuildCommand build => $"Build {build.BuildingDefinitionId} ({build.X},{build.Y},{build.Z}) rot={build.Rotation} layer={build.Layer}",
+            DeleteCommand delete => $"Delete ({delete.X},{delete.Y},{delete.Z}) layer={delete.Layer}",
+            _ => command.Type.ToString()
+        };
     }
 
     private readonly struct PendingPing

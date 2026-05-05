@@ -95,6 +95,22 @@ public sealed class MultiplayerDebugUiBehaviour : MonoBehaviour
         GUILayout.Label($"World Hash: {session.CurrentWorldHash}");
         GUILayout.Label($"World Entities: {session.WorldEntityCount}");
         GUILayout.Label($"Pending Commands: {session.PendingLocalCommandCount}");
+        GUILayout.Label($"Last Command: {session.LastCommandSummary}");
+
+        GUILayout.Space(6);
+        GUILayout.Label("Shadow World Entities (first 10):");
+        var entities = session.GetDebugWorldEntities(10);
+        if (entities.Count == 0)
+        {
+            GUILayout.Label("  (none)");
+        }
+        else
+        {
+            foreach (var entity in entities)
+            {
+                GUILayout.Label($"  {entity.BuildingDefinitionId} ({entity.X},{entity.Y},{entity.Z}) rot={entity.Rotation} layer={entity.Layer}");
+            }
+        }
 
         GUILayout.Space(8);
         GUILayout.BeginHorizontal();
