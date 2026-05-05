@@ -51,6 +51,12 @@ public sealed class MultiplayerSessionController : IDisposable
     private bool pendingAutoLeaveOnNullMap;
     private long autoLeaveOnNullMapAtMs;
     private const int AutoLeaveNullMapDelayMs = 1500;
+    private bool pendingShadowSnapshotApply;
+    private int pendingShadowSnapshotApplyAttempts;
+    private long nextShadowSnapshotApplyAtMs;
+    private string pendingShadowSnapshotApplyReason = string.Empty;
+    private const int ShadowSnapshotApplyRetryDelayMs = 250;
+    private const int ShadowSnapshotApplyWarnEveryAttempts = 20;
 
     public MultiplayerSessionController(ILogger logger, ISteamPlatformApi steamApi)
     {
@@ -184,11 +190,7 @@ public sealed class MultiplayerSessionController : IDisposable
         worldSyncEnabled = true;
         if (worldState.Count > 0)
         {
-            if (!TryApplyShadowSnapshotToRealMap(out string applyError))
-            {
-                message = $"World sync enabled, but snapshot apply failed: {applyError}";
-                return false;
-            }
+            QueueShadowSnapshotApply("enable-world-sync");
         }
 
         ulong hostSteamId = CurrentOwnerSteamId;
@@ -197,13 +199,17 @@ public sealed class MultiplayerSessionController : IDisposable
             SendHello(hostSteamId);
         }
 
-        message = "World sync enabled and snapshot requested from host";
+        message = "World sync enabled; snapshot apply queued and host refresh requested";
         return true;
     }
 
     public void DisableWorldSync()
     {
         worldSyncEnabled = false;
+        pendingShadowSnapshotApply = false;
+        pendingShadowSnapshotApplyAttempts = 0;
+        nextShadowSnapshotApplyAtMs = 0;
+        pendingShadowSnapshotApplyReason = string.Empty;
     }
 
     private bool TrySendBuildCommandInternal(string buildingDefinitionId, int x, int y, int z, byte rotation, byte layer, bool fromMapHook, out string message)
@@ -313,6 +319,10 @@ public sealed class MultiplayerSessionController : IDisposable
         worldSyncEnabled = false;
         pendingAutoLeaveOnNullMap = false;
         autoLeaveOnNullMapAtMs = 0;
+        pendingShadowSnapshotApply = false;
+        pendingShadowSnapshotApplyAttempts = 0;
+        nextShadowSnapshotApplyAtMs = 0;
+        pendingShadowSnapshotApplyReason = string.Empty;
         UnbindMapHooks();
     }
 
@@ -332,6 +342,7 @@ public sealed class MultiplayerSessionController : IDisposable
         ProcessPendingAutoLeaveOnNullMap();
 
         PumpIncomingPackets();
+        ProcessPendingShadowSnapshotApply();
         SendPeriodicPings();
         StatusText = $"Lobby={CurrentLobbyId} host={IsHost} peers={ConnectedPeerCount}";
         EmitStatusLogIfDue();
@@ -368,6 +379,10 @@ public sealed class MultiplayerSessionController : IDisposable
         worldSyncEnabled = isHost;
         pendingAutoLeaveOnNullMap = false;
         autoLeaveOnNullMapAtMs = 0;
+        pendingShadowSnapshotApply = false;
+        pendingShadowSnapshotApplyAttempts = 0;
+        nextShadowSnapshotApplyAtMs = 0;
+        pendingShadowSnapshotApplyReason = string.Empty;
         mapHooksReady = false;
         observedBuildingIds.Clear();
         observedIslandIds.Clear();
@@ -1031,6 +1046,70 @@ public sealed class MultiplayerSessionController : IDisposable
         LeaveLobby();
     }
 
+    private void QueueShadowSnapshotApply(string reason)
+    {
+        if (IsHost)
+        {
+            return;
+        }
+
+        pendingShadowSnapshotApply = true;
+        pendingShadowSnapshotApplyAttempts = 0;
+        nextShadowSnapshotApplyAtMs = GetNowMs();
+        pendingShadowSnapshotApplyReason = reason;
+        logger.Info?.Log($"[MP_SNAPSHOT] Queued real-map apply reason={reason} entities={worldState.Count}");
+    }
+
+    private void ProcessPendingShadowSnapshotApply()
+    {
+        if (!pendingShadowSnapshotApply)
+        {
+            return;
+        }
+
+        if (!IsInLobby || IsHost || !worldSyncEnabled)
+        {
+            pendingShadowSnapshotApply = false;
+            pendingShadowSnapshotApplyAttempts = 0;
+            nextShadowSnapshotApplyAtMs = 0;
+            pendingShadowSnapshotApplyReason = string.Empty;
+            return;
+        }
+
+        if (trackedMap == default)
+        {
+            return;
+        }
+
+        long now = GetNowMs();
+        if (now < nextShadowSnapshotApplyAtMs)
+        {
+            return;
+        }
+
+        if (TryApplyShadowSnapshotToRealMap(out string applyError))
+        {
+            logger.Info?.Log($"[MP_SNAPSHOT] Real-map apply completed reason={pendingShadowSnapshotApplyReason} attempts={pendingShadowSnapshotApplyAttempts}");
+            pendingShadowSnapshotApply = false;
+            pendingShadowSnapshotApplyAttempts = 0;
+            nextShadowSnapshotApplyAtMs = 0;
+            pendingShadowSnapshotApplyReason = string.Empty;
+            return;
+        }
+
+        pendingShadowSnapshotApplyAttempts++;
+        bool simulationBusy = applyError.IndexOf("SimulationGraph is currently updating", StringComparison.OrdinalIgnoreCase) >= 0;
+        int delayMs = simulationBusy ? ShadowSnapshotApplyRetryDelayMs : 500;
+        nextShadowSnapshotApplyAtMs = now + delayMs;
+
+        if (pendingShadowSnapshotApplyAttempts == 1 ||
+            pendingShadowSnapshotApplyAttempts % ShadowSnapshotApplyWarnEveryAttempts == 0 ||
+            !simulationBusy)
+        {
+            logger.Warning?.Log($"[MP_SNAPSHOT] Real-map apply retry scheduled reason={pendingShadowSnapshotApplyReason} attempts={pendingShadowSnapshotApplyAttempts} delayMs={delayMs} error={applyError}");
+        }
+    }
+
     private bool TryRebuildShadowWorldFromLiveMap(out string error)
     {
         if (!IsHost)
@@ -1270,26 +1349,34 @@ public sealed class MultiplayerSessionController : IDisposable
 
         bool success = false;
         string localError = string.Empty;
-        RunWithSuppressedMapEvents(() =>
+        try
         {
-            success = command switch
+            RunWithSuppressedMapEvents(() =>
             {
-                BuildCommand build => TryApplyBuildToRealMapCore(build, out localError),
-                DeleteCommand delete => TryApplyDeleteToRealMapCore(delete, out localError),
-                CreateIslandCommand createIsland => TryApplyCreateIslandToRealMapCore(createIsland, out localError),
-                DeleteIslandCommand deleteIsland => TryApplyDeleteIslandToRealMapCore(deleteIsland, out localError),
-                _ => false
-            };
+                success = command switch
+                {
+                    BuildCommand build => TryApplyBuildToRealMapCore(build, out localError),
+                    DeleteCommand delete => TryApplyDeleteToRealMapCore(delete, out localError),
+                    CreateIslandCommand createIsland => TryApplyCreateIslandToRealMapCore(createIsland, out localError),
+                    DeleteIslandCommand deleteIsland => TryApplyDeleteIslandToRealMapCore(deleteIsland, out localError),
+                    _ => false
+                };
 
-            if (!success &&
-                command is not BuildCommand &&
-                command is not DeleteCommand &&
-                command is not CreateIslandCommand &&
-                command is not DeleteIslandCommand)
-            {
-                localError = $"unsupported command type for real map apply: {command.Type}";
-            }
-        });
+                if (!success &&
+                    command is not BuildCommand &&
+                    command is not DeleteCommand &&
+                    command is not CreateIslandCommand &&
+                    command is not DeleteIslandCommand)
+                {
+                    localError = $"unsupported command type for real map apply: {command.Type}";
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            success = false;
+            localError = ex.Message;
+        }
 
         error = localError;
         if (success)
@@ -1438,56 +1525,64 @@ public sealed class MultiplayerSessionController : IDisposable
 
         bool success = true;
         string localError = string.Empty;
-        RunWithSuppressedMapEvents(() =>
+        try
         {
-            if (!TryClearRealMapCore(out localError))
+            RunWithSuppressedMapEvents(() =>
             {
-                success = false;
-                return;
-            }
-
-            foreach (WorldIslandState island in islands)
-            {
-                CreateIslandCommand command = new()
-                {
-                    LocalCommandId = 0,
-                    IssuerPlayerId = 0,
-                    IslandDefinitionId = island.IslandDefinitionId,
-                    X = island.X,
-                    Y = island.Y,
-                    Z = island.Z,
-                    Rotation = island.Rotation
-                };
-
-                if (!TryApplyCreateIslandToRealMapCore(command, out localError))
+                if (!TryClearRealMapCore(out localError))
                 {
                     success = false;
                     return;
                 }
-            }
 
-            foreach (WorldEntityState entity in entities)
-            {
-                BuildCommand command = new()
+                foreach (WorldIslandState island in islands)
                 {
-                    LocalCommandId = 0,
-                    IssuerPlayerId = 0,
-                    BuildingDefinitionId = entity.BuildingDefinitionId,
-                    X = entity.X,
-                    Y = entity.Y,
-                    Z = entity.Z,
-                    Rotation = entity.Rotation,
-                    Layer = entity.Layer,
-                    ExtraPayload = Array.Empty<byte>()
-                };
+                    CreateIslandCommand command = new()
+                    {
+                        LocalCommandId = 0,
+                        IssuerPlayerId = 0,
+                        IslandDefinitionId = island.IslandDefinitionId,
+                        X = island.X,
+                        Y = island.Y,
+                        Z = island.Z,
+                        Rotation = island.Rotation
+                    };
 
-                if (!TryApplyBuildToRealMapCore(command, out localError))
-                {
-                    success = false;
-                    return;
+                    if (!TryApplyCreateIslandToRealMapCore(command, out localError))
+                    {
+                        success = false;
+                        return;
+                    }
                 }
-            }
-        });
+
+                foreach (WorldEntityState entity in entities)
+                {
+                    BuildCommand command = new()
+                    {
+                        LocalCommandId = 0,
+                        IssuerPlayerId = 0,
+                        BuildingDefinitionId = entity.BuildingDefinitionId,
+                        X = entity.X,
+                        Y = entity.Y,
+                        Z = entity.Z,
+                        Rotation = entity.Rotation,
+                        Layer = entity.Layer,
+                        ExtraPayload = Array.Empty<byte>()
+                    };
+
+                    if (!TryApplyBuildToRealMapCore(command, out localError))
+                    {
+                        success = false;
+                        return;
+                    }
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            success = false;
+            localError = ex.Message;
+        }
 
         error = localError;
         if (success)
@@ -1684,6 +1779,10 @@ public sealed class MultiplayerSessionController : IDisposable
             if (!TryApplyCommandToRealMap(message.Command, out string applyError))
             {
                 logger.Warning?.Log($"[MP_COMMAND] Authoritative applied to shadow, but real map apply failed: {applyError}");
+                if (applyError.IndexOf("SimulationGraph is currently updating", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    QueueShadowSnapshotApply("authoritative-command-retry");
+                }
             }
         }
 
@@ -1821,10 +1920,7 @@ public sealed class MultiplayerSessionController : IDisposable
 
             if (!IsHost && worldSyncEnabled)
             {
-                if (!TryApplyShadowSnapshotToRealMap(out string applyError))
-                {
-                    logger.Warning?.Log($"[MP_SNAPSHOT] Shadow snapshot applied but real map sync failed: {applyError}");
-                }
+                QueueShadowSnapshotApply($"snapshot-{end.SnapshotId}");
             }
 
             if (!IsHost)
